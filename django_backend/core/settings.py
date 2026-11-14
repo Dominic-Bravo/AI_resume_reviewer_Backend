@@ -10,10 +10,15 @@ For the full list of settings and their values, see
 https://docs.djangoproject.com/en/6.1/ref/settings/
 """
 
+import os
 from pathlib import Path
 
-# Build paths inside the project like this: BASE_DIR / 'subdir'.
+from dotenv import load_dotenv
+
 BASE_DIR = Path(__file__).resolve().parent.parent
+
+
+load_dotenv(BASE_DIR / ".env")
 
 
 # Quick-start development settings - unsuitable for production
@@ -43,11 +48,116 @@ INSTALLED_APPS = [
     "django.contrib.sessions",
     "django.contrib.messages",
     "django.contrib.staticfiles",
+    "django.contrib.sites",
+    # Social Auth & Registration
+    "allauth",
+    "allauth.account",
+    "allauth.socialaccount",
+    "allauth.socialaccount.providers.google",
+    "allauth.socialaccount.providers.facebook",
+    "dj_rest_auth",
+    "dj_rest_auth.registration",
+    # security
+    "rest_framework_simplejwt",
+    "rest_framework_simplejwt.token_blacklist",
+    "rest_framework.authtoken",
     "rest_framework",
     "api",
 ]
 
+
+SITE_ID = 1
+
+# Tell allauth/dj-rest-auth to use your custom User model
+SOCIALACCOUNT_ADAPTER = "users.adapters.CustomSocialAccountAdapter"
+
+AUTHENTICATION_BACKENDS = [
+    "django.contrib.auth.backends.ModelBackend",
+    "allauth.account.auth_backends.AuthenticationBackend",
+]
+
+from datetime import timedelta
+
+# --- SimpleJWT Settings ---
+SIMPLE_JWT = {
+    "ACCESS_TOKEN_LIFETIME": timedelta(minutes=15),  # Short-lived Access Token
+    "REFRESH_TOKEN_LIFETIME": timedelta(days=7),  # Refresh Token lifespan
+    "ROTATE_REFRESH_TOKENS": True,  # Issue a new refresh token upon refresh
+    "BLACKLIST_AFTER_ROTATION": True,  # Invalidate used refresh tokens
+    "AUTH_HEADER_TYPES": ("Bearer",),
+    # Cookie Specifics
+    "AUTH_COOKIE": "refresh_token",
+    "AUTH_COOKIE_PATH": "/",  # Scope cookie strictly to refresh endpoint
+    "AUTH_COOKIE_HTTP_ONLY": True,  # Prevents JS/XSS access
+    "AUTH_COOKIE_SECURE": not os.getenv("DEBUG", "True")
+    == "True",  # True in Production (HTTPS)
+    "AUTH_COOKIE_SAMESITE": "Lax",  # Prevents CSRF while preserving navigation
+}
+
+# --- REST Framework & SimpleJWT Configuration ---
+REST_FRAMEWORK = {
+    "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
+    "DEFAULT_AUTHENTICATION_CLASSES": (
+        "rest_framework_simplejwt.authentication.JWTAuthentication",
+    ),
+    "DEFAULT_PERMISSION_CLASSES": (
+        "rest_framework.permissions.IsAuthenticatedOrReadOnly",
+    ),
+}
+
+# Integrate SimpleJWT with dj-rest-auth
+REST_AUTH = {
+    "USE_JWT": True,
+    "JWT_AUTH_HTTPONLY": False,  # Handled via custom response/cookie helper
+    "USER_DETAILS_SERIALIZER": "users.serializers.UserMeSerializer",
+}
+
+# --- Allauth Account & OAuth Settings ---
+ACCOUNT_USER_MODEL_USERNAME_FIELD = None
+ACCOUNT_LOGIN_METHODS = {"email"}
+# ACCOUNT_EMAIL_REQUIRED = True
+# ACCOUNT_USERNAME_REQUIRED = False
+ACCOUNT_SIGNUP_FIELDS = ["email*", "password1*", "password2*"]
+ACCOUNT_EMAIL_VERIFICATION = "none"  # Set to "optional" or "mandatory" in production
+
+SOCIALACCOUNT_AUTO_SIGNUP = True
+SOCIALACCOUNT_QUERY_EMAIL = True
+SOCIALACCOUNT_EMAIL_REQUIRED = True
+
+SOCIALACCOUNT_PROVIDERS = {
+    "google": {
+        "APPS": [
+            {
+                "client_id": os.getenv("GOOGLE_CLIENT_ID", ""),
+                "secret": os.getenv("GOOGLE_CLIENT_SECRET", ""),
+                "key": "",
+            }
+        ],
+        "SCOPE": [
+            "profile",
+            "email",
+            "https://www.googleapis.com/auth/user.birthday.read",  # Required for DOB
+            "https://www.googleapis.com/auth/user.gender.read",  # Required for Gender
+        ],
+        "AUTH_PARAMS": {"access_type": "online"},
+    },
+    "facebook": {
+        "APPS": [
+            {
+                "client_id": os.getenv("FACEBOOK_APP_ID", ""),
+                "secret": os.getenv("FACEBOOK_APP_SECRET", ""),
+                "key": "",
+            }
+        ],
+        "METHOD": "oauth2",
+        "SCOPE": ["email", "public_profile"],
+        "FIELDS": ["id", "first_name", "last_name", "name", "picture"],
+    },
+}
+
+
 MIDDLEWARE = [
+    "corsheaders.middleware.CorsMiddleware",  # Place as high as possible
     "django.middleware.security.SecurityMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
@@ -55,6 +165,7 @@ MIDDLEWARE = [
     "django.contrib.auth.middleware.AuthenticationMiddleware",
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
+    "allauth.account.middleware.AccountMiddleware",
 ]
 
 ROOT_URLCONF = "core.urls"
@@ -76,6 +187,14 @@ TEMPLATES = [
 
 WSGI_APPLICATION = "core.wsgi.application"
 
+# allauth
+
+CSRF_COOKIE_HTTP_ONLY = (
+    False  # Set to False so frontend JavaScript can read the CSRF token from cookie
+)
+CSRF_COOKIE_SAMESITE = "Lax"
+CSRF_COOKIE_SECURE = not os.getenv("DEBUG", "True") == "True"
+
 
 CELERY_BROKER_URL = "redis://redis:6379/0"
 CELERY_RESULT_BACKEND = "redis://redis:6379/0"
@@ -86,8 +205,12 @@ CELERY_RESULT_BACKEND = "redis://redis:6379/0"
 
 DATABASES = {
     "default": {
-        "ENGINE": "django.db.backends.sqlite3",
-        "NAME": BASE_DIR / "db.sqlite3",
+        "ENGINE": "django.db.backends.postgresql",
+        "NAME": os.environ.get("POSTGRES_DB", "resume_db"),
+        "USER": os.environ.get("POSTGRES_USER", "postgres"),
+        "PASSWORD": os.environ.get("POSTGRES_PASSWORD", "postgrespassword"),
+        "HOST": "db",  # Must match your service name in docker-compose.yml
+        "PORT": "5432",
     }
 }
 

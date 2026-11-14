@@ -5,3 +5,10 @@ celery
 redis
 requests
 gunicorn
+django-allauth
+djangorestframework-simplejwt
+drf-spectacular
+python-dotenv
+django-allauth[socialaccount]
+django-cors-headers
+dj-rest-auth[with-social]
