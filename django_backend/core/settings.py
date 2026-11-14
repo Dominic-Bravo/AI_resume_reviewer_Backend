@@ -57,6 +57,7 @@ INSTALLED_APPS = [
     "allauth.socialaccount.providers.facebook",
     "dj_rest_auth",
     "dj_rest_auth.registration",
+    "drf_spectacular",
     # security
     "rest_framework_simplejwt",
     "rest_framework_simplejwt.token_blacklist",
@@ -89,8 +90,8 @@ SIMPLE_JWT = {
     "AUTH_COOKIE": "refresh_token",
     "AUTH_COOKIE_PATH": "/",  # Scope cookie strictly to refresh endpoint
     "AUTH_COOKIE_HTTP_ONLY": True,  # Prevents JS/XSS access
-    "AUTH_COOKIE_SECURE": not os.getenv("DEBUG", "True")
-    == "True",  # True in Production (HTTPS)
+    "AUTH_COOKIE_SECURE": os.getenv("DEBUG", "True")
+    != "True",  # True in Production (HTTPS)
     "AUTH_COOKIE_SAMESITE": "Lax",  # Prevents CSRF while preserving navigation
 }
 
