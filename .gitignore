@@ -1,0 +1,41 @@
+# Environment variables & secrets
+.env
+.env.*
+!.env.example
+
+# Python bytecode & caches
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+
+# Django specific
+*.log
+local_settings.py
+db.sqlite3
+db.sqlite3-journal
+/media
+/staticfiles
+
+# Docker local volumes / overrides
+docker-compose.override.yml
+postgres_data/
+redis_data/
+
+# IDE & OS clutter
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
