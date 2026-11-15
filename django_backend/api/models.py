@@ -74,7 +74,15 @@ class CreditTransaction(models.Model):
     user = models.ForeignKey(
         User, on_delete=models.CASCADE, related_name="transactions"
     )
-    stripe_pay_id = models.CharField(max_length=255)
-    credits_added = models.IntegerField()
-    amount_cents = models.IntegerField()
+    stripe_pay_id = models.CharField(max_length=255, blank=True, null=True)
+    credits_added = models.IntegerField(
+        default=0
+    )  # Positive for top-ups, negative for usage
+    amount_cents = models.IntegerField(
+        default=0
+    )  # Cost in cents (0 for free/deductions)
+    description = models.CharField(max_length=255, blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"{self.user.email} - {self.credits_added} credits ({self.description or 'Stripe Top-up'})"

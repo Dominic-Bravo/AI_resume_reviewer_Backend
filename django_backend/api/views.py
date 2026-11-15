@@ -1,3 +1,5 @@
+import hashlib
+
 import redis
 import requests
 from django.conf import settings
@@ -12,7 +14,7 @@ from rest_framework_simplejwt.exceptions import TokenError
 from rest_framework_simplejwt.settings import api_settings
 from rest_framework_simplejwt.tokens import RefreshToken
 
-from api.models import Resume, ScanReport, User
+from api.models import CreditTransaction, Resume, ScanReport, User
 from api.serializers import (
     LoginSerializer,
     LogoutSerializer,
@@ -190,122 +192,107 @@ class UploadResumeView(APIView):
         },
         tags=["Resume Pipeline"],
     )
-    def post(self, request):
-        file_obj = request.FILES.get("file")
-        target_job_title = request.data.get("target_job_title", "")
-        target_job_desc = request.data.get("target_job_desc", "")
+    def post(self, request, *args, **kwargs):
+        user = request.user
+        uploaded_file = request.FILES.get("file")
+        target_job_title = request.data.get("target_job_title", "General Software Role")
+        target_job_desc = request.data.get(
+            "target_job_desc", "Standard professional expectations."
+        )
 
-        if not file_obj:
+        if not uploaded_file:
             return Response(
                 {"error": "No resume file provided."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # Temporary mock user or request.user if using auth
-        user, _ = User.objects.get_or_create(
-            email="test@example.com", defaults={"password": "mock_password"}
-        )
+        # 1. Compute file hash for idempotency checking
+        file_bytes = uploaded_file.read()
+        file_hash = hashlib.sha256(file_bytes).hexdigest()
+        uploaded_file.seek(0)  # Reset pointer after reading
 
-        # 1. Compute file hash
-        file_hash = calculate_file_hash(file_obj)
+        # 2. Check if this exact resume already exists for this user
+        existing_resume = Resume.objects.filter(file_hash=file_hash, user=user).first()
+        latest_scan = None
 
-        # 2. Redis Distributed Lock (prevents rapid multi-click duplicates)
-        lock_key = f"lock:upload:{user.id}:{file_hash}"
-        acquired = redis_client.set(lock_key, "locked", ex=10, nx=True)
+        if existing_resume:
+            latest_scan = existing_resume.scans.order_by("-created_at").first()
 
-        if not acquired:
-            return Response(
-                {
-                    "error": "A duplicate upload request for this file is already being processed."
-                },
-                status=status.HTTP_409_CONFLICT,
-            )
-
-        try:
-            # 3. Persistent Database Idempotency Check
-            existing_resume = Resume.objects.filter(
-                user=user, file_hash=file_hash
-            ).first()
-
-            if existing_resume:
-                scan_report, created = ScanReport.objects.get_or_create(
-                    resume=existing_resume,
-                    target_job_title=target_job_title,
-                    defaults={"status": ScanReport.Status.PENDING},
-                )
+            # If the previous scan failed, re-trigger the AI task without deducting credits again
+            if latest_scan and latest_scan.status == ScanReport.Status.FAILED:
+                latest_scan.status = ScanReport.Status.PENDING
+                latest_scan.save(update_fields=["status"])
+                run_ai_review_task.delay(latest_scan.id)
 
                 return Response(
                     {
-                        "message": "Idempotent hit: Resume already exists. No credits deducted.",
-                        "resume_id": str(existing_resume.id),
-                        "scan_id": str(scan_report.id),
-                        "status": scan_report.status,
-                        "cached": True,
+                        "message": "Previous scan failed. Retrying AI analysis...",
+                        "resume_id": existing_resume.id,
+                        "scan_id": latest_scan.id,
+                        "status": "PENDING",
                     },
                     status=status.HTTP_200_OK,
                 )
 
-            # 4. Check User Credits for Brand New Uploads
-            if user.credits <= 0:
-                return Response(
-                    {
-                        "error": "Insufficient credits. Please top up to analyze new resumes."
-                    },
-                    status=status.HTTP_402_PAYMENT_REQUIRED,
-                )
-
-            # 5. Forward to FastAPI for Parsing if brand new
-            fastapi_url = "http://fastapi:8001/api/v1/parse"
-            file_obj.seek(0)
-            files = {"file": (file_obj.name, file_obj.read(), file_obj.content_type)}
-
-            response = requests.post(fastapi_url, files=files, timeout=15)
-            if response.status_code != 200:
-                return Response(
-                    {"error": "FastAPI parsing failed."},
-                    status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                )
-
-            parse_data = response.json()
-
-            # 6. Save to RESUMES table
-            resume = Resume.objects.create(
-                user=user,
-                file_name=file_obj.name,
-                file_hash=file_hash,
-                parsed_text=parse_data.get("parsed_text", ""),
-            )
-
-            # 7. Create initial SCAN_REPORTS record
-            scan_report = ScanReport.objects.create(
-                resume=resume,
-                target_job_title=target_job_title,
-                target_job_desc=target_job_desc,
-                status=ScanReport.Status.PENDING,
-            )
-
-            # 8. Deduct 1 credit for new successful analysis
-            user.credits -= 1
-            user.save()
-
-            # 9. Dispatch Celery background task for AI analysis
-            run_ai_review_task.delay(str(scan_report.id))
-
+            # Normal idempotent hit for successful or pending scans
             return Response(
                 {
-                    "message": "Resume uploaded, parsed, and scan initiated successfully. 1 credit deducted.",
-                    "resume_id": str(resume.id),
-                    "scan_id": str(scan_report.id),
-                    "status": scan_report.status,
-                    "remaining_credits": user.credits,
-                    "cached": False,
+                    "message": "Idempotent hit: Resume already exists. No credits deducted.",
+                    "resume_id": existing_resume.id,
+                    "scan_id": latest_scan.id if latest_scan else None,
+                    "status": latest_scan.status if latest_scan else "UNKNOWN",
+                    "cached": True,
                 },
-                status=status.HTTP_201_CREATED,
+                status=status.HTTP_200_OK,
             )
 
-        finally:
-            # Always release the Redis lock
-            redis_client.delete(lock_key)
+        # 3. Check credits before processing a brand new upload
+        if user.credits < 1:
+            return Response(
+                {
+                    "error": "Insufficient credits. Please top up to analyze new resumes."
+                },
+                status=status.HTTP_402_PAYMENT_REQUIRED,
+            )
+
+        # Deduct credit & record transaction
+        user.credits -= 1
+        user.save()
+
+        CreditTransaction.objects.create(
+            user=user,
+            credits_added=-1,  # Negative value indicates usage
+            amount_cents=0,  # No monetary charge for using existing credits
+            description=f"Resume scan deduction for {uploaded_file.name}",
+        )
+        # 5. Create Resume and initial pending ScanReport record
+        resume = Resume.objects.create(
+            user=user,
+            file_name=uploaded_file.name,
+            file_hash=file_hash,
+            parsed_text="[Extracted resume text placeholder from parser]",
+        )
+
+        scan_report = ScanReport.objects.create(
+            resume=resume,
+            target_job_title=target_job_title,
+            target_job_desc=target_job_desc,
+            status=ScanReport.Status.PENDING,
+        )
+
+        # 6. Dispatch background Celery task for AI generation
+        run_ai_review_task.delay(scan_report.id)
+
+        return Response(
+            {
+                "message": "Resume uploaded successfully. Analysis in progress.",
+                "resume_id": resume.id,
+                "scan_id": scan_report.id,
+                "status": scan_report.status,
+                "remaining_credits": user.credits,
+            },
+            status=status.HTTP_201_CREATED,
+        )
 
 
 class ScanResultDetailView(APIView):
