@@ -1,5 +1,6 @@
 import hashlib
 
+import pypdf
 import redis
 import requests
 from django.conf import settings
@@ -246,6 +247,29 @@ class UploadResumeView(APIView):
                 status=status.HTTP_200_OK,
             )
 
+        extracted_text = ""
+
+        try:
+            reader = pypdf.PdfReader(uploaded_file)
+            for page in reader.pages:
+                text = page.extract_text()
+                if text:
+                    extracted_text += text + "\n"
+        except Exception as e:
+            return Response(
+                {"error": f"FAILED to parse PDF text: {str(e)}"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        extracted_text = extracted_text.strip()
+
+        if not extracted_text:
+            return Response(
+                {
+                    "error": "The uploaded PDF appears to be empty or contains no selectable text."
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
         # 3. Check credits before processing a brand new upload
         if user.credits < 1:
             return Response(
@@ -266,11 +290,12 @@ class UploadResumeView(APIView):
             description=f"Resume scan deduction for {uploaded_file.name}",
         )
         # 5. Create Resume and initial pending ScanReport record
+        # (Assuming your parser handles text extraction or stores the file properly)
         resume = Resume.objects.create(
             user=user,
             file_name=uploaded_file.name,
             file_hash=file_hash,
-            parsed_text="[Extracted resume text placeholder from parser]",
+            parsed_text=extracted_text,
         )
 
         scan_report = ScanReport.objects.create(
