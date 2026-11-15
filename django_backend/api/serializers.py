@@ -115,3 +115,13 @@ class UserMeSerializer(serializers.ModelSerializer):
             "created_at",
         )
         read_only_fields = ("id", "email", "created_at")
+
+
+class UploadResumeSerializer(serializers.Serializer):
+    file = serializers.FileField(help_text="PDF or DOCX resume file")
+    target_job_title = serializers.CharField(
+        required=False, allow_blank=True, help_text="Optional target job title"
+    )
+    target_job_desc = serializers.CharField(
+        required=False, allow_blank=True, help_text="Optional target job description"
+    )

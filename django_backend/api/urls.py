@@ -3,9 +3,9 @@ from rest_framework.routers import DefaultRouter
 
 from api.views import (
     LoginAPIView,
-    ProtectedTestView,
     RegisterAPIView,
     TokenRefreshAPIView,
+    UploadResumeView,
 )
 
 router = DefaultRouter()
@@ -16,6 +16,6 @@ urlpatterns = [
     path("register/", RegisterAPIView.as_view(), name="auth_register"),
     path("login/", LoginAPIView.as_view(), name="login"),
     path("token/refresh/", TokenRefreshAPIView.as_view(), name="token_refresh"),
-    path("api/v1/protected-test/", ProtectedTestView.as_view(), name="protected-test"),
+    path("api/v1/upload-resume/", UploadResumeView.as_view(), name="upload-resume"),
     path("", include(router.urls)),
 ]

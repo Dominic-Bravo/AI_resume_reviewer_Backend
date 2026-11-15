@@ -1,20 +1,28 @@
+import redis
+import requests
 from django.conf import settings
 from django.middleware.csrf import get_token
+from drf_spectacular.utils import OpenApiParameter, OpenApiTypes, extend_schema
 from rest_framework import permissions, status
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
+from rest_framework.serializers import CharField, Serializer
 from rest_framework.views import APIView
 from rest_framework_simplejwt.exceptions import TokenError
 from rest_framework_simplejwt.settings import api_settings
 from rest_framework_simplejwt.tokens import RefreshToken
 
+from api.models import Resume, ScanReport, User
 from api.serializers import (
     LoginSerializer,
     LogoutSerializer,
     RegisterSerializer,
+    UploadResumeSerializer,
     UserMeSerializer,
     UserResponseSerializer,
 )
+from api.tasks import run_ai_review_task
+from api.utils import calculate_file_hash
 
 
 def set_refresh_cookie(response: Response, refresh_token: str) -> None:
@@ -145,3 +153,141 @@ class ProtectedTestView(APIView):
             },
             status=status.HTTP_200_OK,
         )
+
+
+# Redis client for concurrency locking
+redis_client = redis.Redis.from_url(
+    getattr(settings, "REDIS_URL", "redis://redis:6379/0")
+)
+
+
+class UploadResumeView(APIView):
+    serializer_class = UploadResumeSerializer
+
+    @extend_schema(
+        summary="Upload and Scan Resume (Idempotent)",
+        request={
+            "multipart/form-data": {
+                "type": "object",
+                "properties": {
+                    "file": {
+                        "type": "string",
+                        "format": "binary",
+                        "description": "PDF or DOCX resume file",
+                    },
+                    "target_job_title": {
+                        "type": "string",
+                        "description": "Optional target job title",
+                    },
+                    "target_job_desc": {
+                        "type": "string",
+                        "description": "Optional target job description",
+                    },
+                },
+                "required": ["file"],
+            }
+        },
+        tags=["Resume Pipeline"],
+    )
+    def post(self, request):
+        file_obj = request.FILES.get("file")
+        target_job_title = request.data.get("target_job_title", "")
+        target_job_desc = request.data.get("target_job_desc", "")
+
+        if not file_obj:
+            return Response(
+                {"error": "No resume file provided."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # Temporary mock user or request.user if using auth
+        user, _ = User.objects.get_or_create(
+            email="test@example.com", defaults={"password": "mock_password"}
+        )
+
+        # 1. Compute file hash
+        file_hash = calculate_file_hash(file_obj)
+
+        # 2. Redis Distributed Lock (prevents rapid multi-click duplicates)
+        lock_key = f"lock:upload:{user.id}:{file_hash}"
+        acquired = redis_client.set(lock_key, "locked", ex=10, nx=True)
+
+        if not acquired:
+            return Response(
+                {
+                    "error": "A duplicate upload request for this file is already being processed."
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        try:
+            # 3. Persistent Database Idempotency Check
+            existing_resume = Resume.objects.filter(
+                user=user, file_hash=file_hash
+            ).first()
+
+            if existing_resume:
+                scan_report, created = ScanReport.objects.get_or_create(
+                    resume=existing_resume,
+                    target_job_title=target_job_title,
+                    defaults={"status": ScanReport.Status.PENDING},
+                )
+
+                return Response(
+                    {
+                        "message": "Idempotent hit: Resume already exists.",
+                        "resume_id": str(existing_resume.id),
+                        "scan_id": str(scan_report.id),
+                        "status": scan_report.status,
+                        "cached": True,
+                    },
+                    status=status.HTTP_200_OK,
+                )
+
+            # 4. Forward to FastAPI for Parsing if brand new
+            fastapi_url = "http://fastapi:8001/api/v1/parse"
+            file_obj.seek(0)
+            files = {"file": (file_obj.name, file_obj.read(), file_obj.content_type)}
+
+            response = requests.post(fastapi_url, files=files, timeout=15)
+            if response.status_code != 200:
+                return Response(
+                    {"error": "FastAPI parsing failed."},
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                )
+
+            parse_data = response.json()
+
+            # 5. Save to RESUMES table
+            resume = Resume.objects.create(
+                user=user,
+                file_name=file_obj.name,
+                file_hash=file_hash,
+                parsed_text=parse_data.get("parsed_text", ""),
+            )
+
+            # 6. Create initial SCAN_REPORTS record
+            scan_report = ScanReport.objects.create(
+                resume=resume,
+                target_job_title=target_job_title,
+                target_job_desc=target_job_desc,
+                status=ScanReport.Status.PENDING,
+            )
+
+            # 7. Dispatch Celery background task for AI analysis
+            run_ai_review_task.delay(str(scan_report.id))
+
+            return Response(
+                {
+                    "message": "Resume uploaded, parsed, and scan initiated successfully.",
+                    "resume_id": str(resume.id),
+                    "scan_id": str(scan_report.id),
+                    "status": scan_report.status,
+                    "cached": False,
+                },
+                status=status.HTTP_201_CREATED,
+            )
+
+        finally:
+            # Always release the Redis lock
+            redis_client.delete(lock_key)
