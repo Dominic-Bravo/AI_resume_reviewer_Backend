@@ -1,38 +1,63 @@
+import os
+
 from celery import shared_task
-from django.core.exceptions import ObjectDoesNotExist
+from google import genai
+from pydantic import BaseModel
 
 from .models import ScanReport
 
 
+class ResumeAnalysisResponse(BaseModel):
+    overall_score: int
+    category_scores: dict
+    missing_keywords: list[str]
+    bullet_critiques: list[str]
+
+
 @shared_task
-def run_ai_review_task(scan_report_id: int) -> None:
-    scan_report = ScanReport.objects.get(id=scan_report_id)
-
+def run_ai_review_task(scan_report_id):
     try:
+        scan_report = ScanReport.objects.get(id=scan_report_id)
         resume_text = scan_report.resume.parsed_text
+        job_title = scan_report.target_job_title or "General Software Role"
+        job_desc = scan_report.target_job_desc or "Standard professional expectations."
 
-        # TODO: AI processing
+        client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
 
-        scan_report.overall_score = 88
-        scan_report.category_scores = {
-            "formatting": 90,
-            "experience": 85,
-        }
-        scan_report.missing_keywords = ["Docker", "FastAPI"]
+        prompt = f"""
+        You are an expert technical recruiter and resume reviewer. 
+        Analyze the following resume text against the target job title and description.
+        
+        Target Job Title: {job_title}
+        Job Description: {job_desc}
+        
+        Resume Text:
+        {resume_text}
+        """
+
+        response = client.models.generate_content(
+            model="gemini-2.5-flash",
+            contents=prompt,
+            config={
+                "response_mime_type": "application/json",
+                "response_schema": ResumeAnalysisResponse,
+            },
+        )
+
+        result_data = ResumeAnalysisResponse.model_validate_json(response.text)
+
+        scan_report.overall_score = result_data.overall_score
+        scan_report.category_scores = result_data.category_scores
+        scan_report.missing_keywords = result_data.missing_keywords
+        scan_report.bullet_critiques = result_data.bullet_critiques
         scan_report.status = ScanReport.Status.DONE
+        scan_report.save()
 
-        scan_report.save(
-            update_fields=[
-                "overall_score",
-                "category_scores",
-                "missing_keywords",
-                "status",
-            ]
-        )
-
-    except Exception:  # noqa: BLE001
-        ScanReport.objects.filter(id=scan_report_id).update(
-            status=ScanReport.Status.FAILED
-        )
-
-        raise
+    except Exception as e:
+        try:
+            scan_report = ScanReport.objects.get(id=scan_report_id)
+            scan_report.status = ScanReport.Status.FAILED
+            scan_report.save()
+        except Exception:
+            pass
+        raise e

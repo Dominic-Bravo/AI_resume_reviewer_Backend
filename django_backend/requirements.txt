@@ -12,3 +12,4 @@ python-dotenv
 django-allauth[socialaccount]
 django-cors-headers
 dj-rest-auth[with-social]
+google-genai

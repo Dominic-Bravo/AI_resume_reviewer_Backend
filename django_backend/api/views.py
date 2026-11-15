@@ -17,6 +17,7 @@ from api.serializers import (
     LoginSerializer,
     LogoutSerializer,
     RegisterSerializer,
+    ScanReportSerializer,
     UploadResumeSerializer,
     UserMeSerializer,
     UserResponseSerializer,
@@ -291,3 +292,30 @@ class UploadResumeView(APIView):
         finally:
             # Always release the Redis lock
             redis_client.delete(lock_key)
+
+
+class ScanResultDetailView(APIView):
+    serializer_class = ScanReportSerializer
+
+    @extend_schema(
+        summary="Get Scan Report Results",
+        description="Retrieves the AI analysis status and results for a given scan report ID.",
+        responses={
+            200: ScanReportSerializer,
+            404: {"description": "Scan report not found."},
+        },
+        tags=["Resume Pipeline"],
+    )
+    def get(self, request, scan_id):
+        try:
+            scan_report = ScanReport.objects.get(id=scan_id)
+        except ScanReport.DoesNotExist:
+            return Response(
+                {"error": "Scan report not found."},
+                status=status.HTTP_404_NOT_FILE_FOUND
+                if hasattr(status, "HTTP_404_NOT_FILE_FOUND")
+                else status.HTTP_404_NOT_FOUND,
+            )
+
+        serializer = ScanReportSerializer(scan_report)
+        return Response(serializer.data, status=status.HTTP_200_OK)

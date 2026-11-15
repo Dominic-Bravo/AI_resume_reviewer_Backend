@@ -2,6 +2,8 @@ from django.contrib.auth import authenticate, get_user_model
 from django.db import transaction
 from rest_framework import serializers
 
+from api.models import ScanReport
+
 User = get_user_model()
 
 
@@ -125,3 +127,19 @@ class UploadResumeSerializer(serializers.Serializer):
     target_job_desc = serializers.CharField(
         required=False, allow_blank=True, help_text="Optional target job description"
     )
+
+
+class ScanReportSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ScanReport
+        fields = [
+            "id",
+            "target_job_title",
+            "target_job_desc",
+            "overall_score",
+            "category_scores",
+            "missing_keywords",
+            "bullet_critiques",
+            "status",
+            "created_at",
+        ]
