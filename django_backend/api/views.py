@@ -5,6 +5,7 @@ from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_simplejwt.exceptions import TokenError
+from rest_framework_simplejwt.settings import api_settings
 from rest_framework_simplejwt.tokens import RefreshToken
 
 from api.serializers import (
@@ -40,17 +41,19 @@ class RegisterAPIView(APIView):
         user = serializer.save()
         refresh = RefreshToken.for_user(user)
 
-        return Response(
+        response = Response(
             {
+                "access": str(refresh.access_token),
                 "user": UserResponseSerializer(user).data,
-                "tokens": {
-                    "refresh": str(refresh),
-                    "access": str(refresh.access_token),
-                },
                 "message": "User registered successfully.",
             },
             status=status.HTTP_201_CREATED,
         )
+
+        # Store refresh token in HttpOnly cookie.
+        set_refresh_cookie(response, str(refresh))
+
+        return response
 
 
 class LoginAPIView(APIView):
@@ -80,7 +83,7 @@ class LoginAPIView(APIView):
 
 class TokenRefreshAPIView(APIView):
     permission_classes = (permissions.AllowAny,)
-    serializer_class = LogoutSerializer  # Fallback serializer for docs
+    serializer_class = LogoutSerializer
 
     def post(self, request, *args, **kwargs):
         refresh_token = request.COOKIES.get(settings.SIMPLE_JWT["AUTH_COOKIE"])
@@ -93,19 +96,33 @@ class TokenRefreshAPIView(APIView):
 
         try:
             refresh = RefreshToken(refresh_token)
-            data = {"access": str(refresh.access_token)}
 
-            if settings.SIMPLE_JWT.get("ROTATE_REFRESH_TOKENS", False):
+            # Generate a new access token.
+            access_token = str(refresh.access_token)
+
+            response = Response(
+                {"access": access_token},
+                status=status.HTTP_200_OK,
+            )
+
+            # Rotate refresh token when enabled.
+            if api_settings.ROTATE_REFRESH_TOKENS:
+                # Blacklist the old refresh token.
+                if api_settings.BLACKLIST_AFTER_ROTATION:
+                    refresh.blacklist()
+
+                # Generate a new refresh token.
                 refresh.set_jti()
                 refresh.set_exp()
+                refresh.set_iat()
+
                 new_refresh = str(refresh)
 
-            response = Response(data, status=status.HTTP_200_OK)
-
-            if settings.SIMPLE_JWT.get("ROTATE_REFRESH_TOKENS", False):
+                # Store the new refresh token in HttpOnly cookie.
                 set_refresh_cookie(response, new_refresh)
 
             return response
+
         except TokenError:
             return Response(
                 {"detail": "Invalid or expired refresh token."},
