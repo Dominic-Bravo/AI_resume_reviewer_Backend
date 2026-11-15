@@ -1,6 +1,7 @@
 from django.conf import settings
 from django.middleware.csrf import get_token
 from rest_framework import permissions, status
+from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_simplejwt.exceptions import TokenError
@@ -110,3 +111,20 @@ class TokenRefreshAPIView(APIView):
                 {"detail": "Invalid or expired refresh token."},
                 status=status.HTTP_401_UNAUTHORIZED,
             )
+
+
+class ProtectedTestView(APIView):
+    permission_classes = (IsAuthenticated,)
+
+    def get(self, request):
+        # request.user is automatically populated by your JWT authentication backend
+        user = request.user
+        return Response(
+            {
+                "message": "Authorization successful! You have accessed a protected endpoint.",
+                "user_id": str(user.id),
+                "email": user.email,
+                "credits": user.credits,
+            },
+            status=status.HTTP_200_OK,
+        )
