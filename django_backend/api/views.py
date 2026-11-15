@@ -236,7 +236,7 @@ class UploadResumeView(APIView):
 
                 return Response(
                     {
-                        "message": "Idempotent hit: Resume already exists.",
+                        "message": "Idempotent hit: Resume already exists. No credits deducted.",
                         "resume_id": str(existing_resume.id),
                         "scan_id": str(scan_report.id),
                         "status": scan_report.status,
@@ -245,7 +245,16 @@ class UploadResumeView(APIView):
                     status=status.HTTP_200_OK,
                 )
 
-            # 4. Forward to FastAPI for Parsing if brand new
+            # 4. Check User Credits for Brand New Uploads
+            if user.credits <= 0:
+                return Response(
+                    {
+                        "error": "Insufficient credits. Please top up to analyze new resumes."
+                    },
+                    status=status.HTTP_402_PAYMENT_REQUIRED,
+                )
+
+            # 5. Forward to FastAPI for Parsing if brand new
             fastapi_url = "http://fastapi:8001/api/v1/parse"
             file_obj.seek(0)
             files = {"file": (file_obj.name, file_obj.read(), file_obj.content_type)}
@@ -259,7 +268,7 @@ class UploadResumeView(APIView):
 
             parse_data = response.json()
 
-            # 5. Save to RESUMES table
+            # 6. Save to RESUMES table
             resume = Resume.objects.create(
                 user=user,
                 file_name=file_obj.name,
@@ -267,7 +276,7 @@ class UploadResumeView(APIView):
                 parsed_text=parse_data.get("parsed_text", ""),
             )
 
-            # 6. Create initial SCAN_REPORTS record
+            # 7. Create initial SCAN_REPORTS record
             scan_report = ScanReport.objects.create(
                 resume=resume,
                 target_job_title=target_job_title,
@@ -275,15 +284,20 @@ class UploadResumeView(APIView):
                 status=ScanReport.Status.PENDING,
             )
 
-            # 7. Dispatch Celery background task for AI analysis
+            # 8. Deduct 1 credit for new successful analysis
+            user.credits -= 1
+            user.save()
+
+            # 9. Dispatch Celery background task for AI analysis
             run_ai_review_task.delay(str(scan_report.id))
 
             return Response(
                 {
-                    "message": "Resume uploaded, parsed, and scan initiated successfully.",
+                    "message": "Resume uploaded, parsed, and scan initiated successfully. 1 credit deducted.",
                     "resume_id": str(resume.id),
                     "scan_id": str(scan_report.id),
                     "status": scan_report.status,
+                    "remaining_credits": user.credits,
                     "cached": False,
                 },
                 status=status.HTTP_201_CREATED,
