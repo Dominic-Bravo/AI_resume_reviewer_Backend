@@ -1,32 +1,26 @@
-import hashlib
-
-import pypdf
 import redis
-import requests
 from django.conf import settings
 from django.middleware.csrf import get_token
-from drf_spectacular.utils import OpenApiParameter, OpenApiTypes, extend_schema
+from drf_spectacular.utils import extend_schema
 from rest_framework import permissions, serializers, status
+from rest_framework.exceptions import APIException, ValidationError
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
-from rest_framework.serializers import CharField, Serializer
 from rest_framework.views import APIView
 from rest_framework_simplejwt.exceptions import TokenError
 from rest_framework_simplejwt.settings import api_settings
 from rest_framework_simplejwt.tokens import RefreshToken
 
-from api.models import CreditTransaction, Resume, ScanReport, User
+from api.models import Resume, ScanReport
 from api.serializers import (
     LoginSerializer,
-    LogoutSerializer,
     RegisterSerializer,
     ScanReportSerializer,
     UploadResumeSerializer,
     UserMeSerializer,
     UserResponseSerializer,
 )
-from api.tasks import run_ai_review_task
-from api.utils import calculate_file_hash
+from api.services import ResumeService
 
 
 def set_refresh_cookie(response: Response, refresh_token: str) -> None:
@@ -199,7 +193,7 @@ class UploadResumeView(APIView):
                     "file": {
                         "type": "string",
                         "format": "binary",
-                        "description": "PDF or DOCX resume file",
+                        "description": "PDF resume file",
                     },
                     "target_job_title": {
                         "type": "string",
@@ -218,10 +212,6 @@ class UploadResumeView(APIView):
     def post(self, request, *args, **kwargs):
         user = request.user
         uploaded_file = request.FILES.get("file")
-        target_job_title = request.data.get("target_job_title", "General Software Role")
-        target_job_desc = request.data.get(
-            "target_job_desc", "Standard professional expectations."
-        )
 
         if not uploaded_file:
             return Response(
@@ -229,117 +219,48 @@ class UploadResumeView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # 1. Compute file hash for idempotency checking
-        file_bytes = uploaded_file.read()
-        file_hash = hashlib.sha256(file_bytes).hexdigest()
-        uploaded_file.seek(0)  # Reset pointer after reading
-
-        # 2. Check if this exact resume already exists for this user
-        existing_resume = Resume.objects.filter(file_hash=file_hash, user=user).first()
-        latest_scan = None
-
-        if existing_resume:
-            latest_scan = existing_resume.scans.order_by("-created_at").first()
-
-            # If the previous scan failed, re-trigger the AI task without deducting credits again
-            if latest_scan and latest_scan.status == ScanReport.Status.FAILED:
-                latest_scan.status = ScanReport.Status.PENDING
-                latest_scan.save(update_fields=["status"])
-                run_ai_review_task.delay(latest_scan.id)
-
-                return Response(
-                    {
-                        "message": "Previous scan failed. Retrying AI analysis...",
-                        "resume_id": existing_resume.id,
-                        "scan_id": latest_scan.id,
-                        "status": "PENDING",
-                    },
-                    status=status.HTTP_200_OK,
-                )
-
-            # Normal idempotent hit for successful or pending scans
-            return Response(
-                {
-                    "message": "Idempotent hit: Resume already exists. No credits deducted.",
-                    "resume_id": existing_resume.id,
-                    "scan_id": latest_scan.id if latest_scan else None,
-                    "status": latest_scan.status if latest_scan else "UNKNOWN",
-                    "cached": True,
-                },
-                status=status.HTTP_200_OK,
-            )
-
-        extracted_text = ""
+        target_job_title = request.data.get("target_job_title", "General Software Role")
+        target_job_desc = request.data.get(
+            "target_job_desc", "Standard professional expectations."
+        )
 
         try:
-            reader = pypdf.PdfReader(uploaded_file)
-            for page in reader.pages:
-                text = page.extract_text()
-                if text:
-                    extracted_text += text + "\n"
-        except Exception as e:
-            return Response(
-                {"error": f"FAILED to parse PDF text: {str(e)}"},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-        extracted_text = extracted_text.strip()
+            file_hash = ResumeService.compute_file_hash(uploaded_file)
 
-        if not extracted_text:
+            # Check Idempotency
+            existing_resume = Resume.objects.filter(
+                file_hash=file_hash, user=user
+            ).first()
+            if existing_resume:
+                data, http_status = ResumeService.handle_idempotent_hit(existing_resume)
+                return Response(data, status=http_status)
+
+            # Extract Text & Process New Scan
+            extracted_text = ResumeService.extract_pdf_text(uploaded_file)
+            resume, scan_report = ResumeService.process_new_resume(
+                user,
+                uploaded_file,
+                file_hash,
+                extracted_text,
+                target_job_title,
+                target_job_desc,
+            )
+
             return Response(
                 {
-                    "error": "The uploaded PDF appears to be empty or contains no selectable text."
+                    "message": "Resume uploaded successfully. Analysis in progress.",
+                    "resume_id": resume.id,
+                    "scan_id": scan_report.id,
+                    "status": scan_report.status,
+                    "remaining_credits": user.credits,
                 },
-                status=status.HTTP_400_BAD_REQUEST,
+                status=status.HTTP_201_CREATED,
             )
 
-        # 3. Check credits before processing a brand new upload
-        if user.credits < 1:
-            return Response(
-                {
-                    "error": "Insufficient credits. Please top up to analyze new resumes."
-                },
-                status=status.HTTP_402_PAYMENT_REQUIRED,
-            )
-
-        # Deduct credit & record transaction
-        user.credits -= 1
-        user.save()
-
-        CreditTransaction.objects.create(
-            user=user,
-            credits_added=-1,  # Negative value indicates usage
-            amount_cents=0,  # No monetary charge for using existing credits
-            description=f"Resume scan deduction for {uploaded_file.name}",
-        )
-        # 5. Create Resume and initial pending ScanReport record
-        # (Assuming your parser handles text extraction or stores the file properly)
-        resume = Resume.objects.create(
-            user=user,
-            file_name=uploaded_file.name,
-            file_hash=file_hash,
-            parsed_text=extracted_text,
-        )
-
-        scan_report = ScanReport.objects.create(
-            resume=resume,
-            target_job_title=target_job_title,
-            target_job_desc=target_job_desc,
-            status=ScanReport.Status.PENDING,
-        )
-
-        # 6. Dispatch background Celery task for AI generation
-        run_ai_review_task.delay(scan_report.id)
-
-        return Response(
-            {
-                "message": "Resume uploaded successfully. Analysis in progress.",
-                "resume_id": resume.id,
-                "scan_id": scan_report.id,
-                "status": scan_report.status,
-                "remaining_credits": user.credits,
-            },
-            status=status.HTTP_201_CREATED,
-        )
+        except ValidationError as e:
+            return Response({"error": str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        except APIException as e:
+            return Response({"error": str(e)}, status=e.status_code)
 
 
 class ScanResultDetailView(APIView):
@@ -356,13 +277,11 @@ class ScanResultDetailView(APIView):
     )
     def get(self, request, scan_id):
         try:
-            scan_report = ScanReport.objects.get(id=scan_id)
+            scan_report = ScanReport.objects.select_related("resume").get(id=scan_id)
         except ScanReport.DoesNotExist:
             return Response(
                 {"error": "Scan report not found."},
-                status=status.HTTP_404_NOT_FILE_FOUND
-                if hasattr(status, "HTTP_404_NOT_FILE_FOUND")
-                else status.HTTP_404_NOT_FOUND,
+                status=status.HTTP_404_NOT_FOUND,
             )
 
         serializer = ScanReportSerializer(scan_report)

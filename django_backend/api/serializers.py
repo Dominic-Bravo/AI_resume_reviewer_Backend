@@ -1,5 +1,6 @@
 from django.contrib.auth import authenticate, get_user_model
 from django.db import transaction
+from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 
 from api.models import ScanReport
@@ -130,10 +131,25 @@ class UploadResumeSerializer(serializers.Serializer):
 
 
 class ScanReportSerializer(serializers.ModelSerializer):
+    file_name = serializers.CharField(source="resume.file_name", read_only=True)
+
+    # 1. Change to SerializerMethodField so DRF calls the get_category_scores method
+    category_scores = serializers.SerializerMethodField()
+
+    missing_keywords = serializers.ListField(
+        child=serializers.CharField(),
+        help_text="List of missing keywords from the job description.",
+    )
+    bullet_critiques = serializers.ListField(
+        child=serializers.CharField(),
+        help_text="Actionable feedback for resume bullet points.",
+    )
+
     class Meta:
         model = ScanReport
-        fields = [
+        fields = (
             "id",
+            "file_name",
             "target_job_title",
             "target_job_desc",
             "overall_score",
@@ -142,4 +158,19 @@ class ScanReportSerializer(serializers.ModelSerializer):
             "bullet_critiques",
             "status",
             "created_at",
-        ]
+        )
+
+    # 2. This explicitly dictates the exact JSON structure for Swagger & Orval
+    @extend_schema_field(
+        {
+            "type": "object",
+            "properties": {
+                "experience": {"type": "integer"},
+                "skills": {"type": "integer"},
+                "formatting": {"type": "integer"},
+                "relevance": {"type": "integer"},
+            },
+        }
+    )
+    def get_category_scores(self, obj):
+        return obj.category_scores
