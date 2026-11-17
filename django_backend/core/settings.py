@@ -58,6 +58,7 @@ INSTALLED_APPS = [
     "dj_rest_auth",
     "dj_rest_auth.registration",
     "drf_spectacular",
+    "corsheaders",
     # security
     "rest_framework_simplejwt",
     "rest_framework_simplejwt.token_blacklist",
@@ -167,7 +168,15 @@ MIDDLEWARE = [
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
     "allauth.account.middleware.AccountMiddleware",
+    "django.middleware.common.CommonMiddleware",
 ]
+
+# CORS configuration
+CORS_ALLOWED_ORIGINS = [
+    "http://localhost:3000",
+]
+
+CORS_ALLOW_CREDENTIALS = True
 
 ROOT_URLCONF = "core.urls"
 
