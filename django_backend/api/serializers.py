@@ -130,19 +130,33 @@ class UploadResumeSerializer(serializers.Serializer):
     )
 
 
+class SectionCritiqueSerializer(serializers.Serializer):
+    section = serializers.CharField(
+        help_text="Resume section (e.g., Experience, Projects, Certifications, Skills, Education)."
+    )
+    target_item = serializers.CharField(
+        help_text="Specific role, project, credential, or area being critiqued."
+    )
+    critique = serializers.CharField(
+        help_text="Actionable feedback tailored to the target industry."
+    )
+    suggested_rewrite = serializers.CharField(
+        help_text="Action-oriented, quantified rewrite suggestion."
+    )
+
+
 class ScanReportSerializer(serializers.ModelSerializer):
     file_name = serializers.CharField(source="resume.file_name", read_only=True)
-
-    # 1. Change to SerializerMethodField so DRF calls the get_category_scores method
     category_scores = serializers.SerializerMethodField()
 
     missing_keywords = serializers.ListField(
         child=serializers.CharField(),
         help_text="List of missing keywords from the job description.",
     )
-    bullet_critiques = serializers.ListField(
-        child=serializers.CharField(),
-        help_text="Actionable feedback for resume bullet points.",
+    section_critiques = SectionCritiqueSerializer(
+        many=True,
+        read_only=True,
+        help_text="Section-by-section actionable feedback across the resume.",
     )
 
     class Meta:
@@ -155,21 +169,16 @@ class ScanReportSerializer(serializers.ModelSerializer):
             "overall_score",
             "category_scores",
             "missing_keywords",
-            "bullet_critiques",
+            "section_critiques",
             "status",
             "created_at",
         )
 
-    # 2. This explicitly dictates the exact JSON structure for Swagger & Orval
+    # Generates `Record<string, number>` in Orval so any industry's score keys are valid
     @extend_schema_field(
         {
             "type": "object",
-            "properties": {
-                "experience": {"type": "integer"},
-                "skills": {"type": "integer"},
-                "formatting": {"type": "integer"},
-                "relevance": {"type": "integer"},
-            },
+            "additionalProperties": {"type": "integer"},
         }
     )
     def get_category_scores(self, obj):

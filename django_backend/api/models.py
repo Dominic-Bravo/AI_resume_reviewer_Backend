@@ -52,6 +52,7 @@ class Resume(models.Model):
 class ScanReport(models.Model):
     class Status(models.TextChoices):
         PENDING = "PENDING", "Pending"
+        PROCESSING = "PROCESSING", "Processing"
         FAILED = "FAILED", "Failed"
         DONE = "DONE", "Done"
 
@@ -62,7 +63,8 @@ class ScanReport(models.Model):
     overall_score = models.IntegerField(default=0)
     category_scores = models.JSONField(default=dict, blank=True)
     missing_keywords = models.JSONField(default=list, blank=True)
-    bullet_critiques = models.JSONField(default=list, blank=True)
+    # Change bullet_critiques -> section_critiques to accurately reflect section-level feedback
+    section_critiques = models.JSONField(default=list, blank=True)
     status = models.CharField(
         max_length=20, choices=Status.choices, default=Status.PENDING
     )
