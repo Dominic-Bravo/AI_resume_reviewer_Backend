@@ -236,7 +236,7 @@ class UploadResumeView(APIView):
                 return Response(data, status=http_status)
 
             # Extract Text & Process New Scan
-            extracted_text = ResumeService.extract_pdf_text(uploaded_file)
+            extracted_text = ResumeService.extract_resume_text(uploaded_file)
             resume, scan_report = ResumeService.process_new_resume(
                 user,
                 uploaded_file,

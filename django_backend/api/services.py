@@ -18,22 +18,34 @@ class ResumeService:
         return file_hash
 
     @staticmethod
-    def extract_pdf_text(uploaded_file) -> str:
+    def extract_resume_text(uploaded_file) -> str:
+        filename = uploaded_file.name.lower()
         extracted_text = ""
+
         try:
-            reader = pypdf.PdfReader(uploaded_file)
-            for page in reader.pages:
-                text = page.extract_text()
-                if text:
-                    extracted_text += text + "\n"
+            if filename.endswith(".pdf"):
+                reader = pypdf.PdfReader(uploaded_file)
+                for page in reader.pages:
+                    text = page.extract_text()
+                    if text:
+                        extracted_text += text + "\n"
+            elif filename.endswith(".docx"):
+                doc = docx.Document(uploaded_file)
+                for paragraph in doc.paragraphs:
+                    if paragraph.text:
+                        extracted_text += paragraph.text + "\n"
+            else:
+                raise ValidationError(
+                    "Unsupported file format. Please upload a PDF or DOCX file."
+                )
+
         except Exception as e:
-            raise ValidationError(f"FAILED to parse PDF text: {str(e)}")
+            raise ValidationError(f"Failed to parse document text: {str(e)}")
 
         extracted_text = extracted_text.strip()
         if not extracted_text:
-            raise ValidationError(
-                "The uploaded PDF appears to be empty or contains no selectable text."
-            )
+            raise ValidationError("The uploaded document appears to be empty.")
+
         return extracted_text
 
     @staticmethod
