@@ -6,7 +6,7 @@ import requests
 from django.conf import settings
 from django.middleware.csrf import get_token
 from drf_spectacular.utils import OpenApiParameter, OpenApiTypes, extend_schema
-from rest_framework import permissions, status
+from rest_framework import permissions, serializers, status
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.serializers import CharField, Serializer
@@ -46,6 +46,12 @@ class RegisterAPIView(APIView):
     permission_classes = (permissions.AllowAny,)
     serializer_class = RegisterSerializer
 
+    @extend_schema(
+        tags=["Authentication"],
+        operation_id="auth_register",
+        summary="Register a new user",
+        description="Creates a new user account, returns an access token, and sets the HttpOnly refresh cookie.",
+    )
     def post(self, request, *args, **kwargs):
         serializer = RegisterSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
@@ -72,6 +78,12 @@ class LoginAPIView(APIView):
     permission_classes = (permissions.AllowAny,)
     serializer_class = LoginSerializer
 
+    @extend_schema(
+        tags=["Authentication"],
+        operation_id="auth_login",
+        summary="Authenticate user and login",
+        description="Validates credentials, returns an access token, and sets the HttpOnly refresh cookie.",
+    )
     def post(self, request, *args, **kwargs):
         serializer = LoginSerializer(data=request.data, context={"request": request})
         serializer.is_valid(raise_exception=True)
@@ -93,10 +105,20 @@ class LoginAPIView(APIView):
         return response
 
 
+class EmptySerializer(serializers.Serializer):
+    pass
+
+
 class TokenRefreshAPIView(APIView):
     permission_classes = (permissions.AllowAny,)
-    serializer_class = LogoutSerializer
+    serializer_class = EmptySerializer
 
+    @extend_schema(
+        tags=["Authentication"],
+        operation_id="auth_token_refresh",
+        summary="Refresh access token",
+        description="Reads the HttpOnly refresh cookie and issues a new access token.",
+    )
     def post(self, request, *args, **kwargs):
         refresh_token = request.COOKIES.get(settings.SIMPLE_JWT["AUTH_COOKIE"])
 
