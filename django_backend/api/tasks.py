@@ -84,7 +84,7 @@ Evaluation Guidelines:
 
         # 3. Call Gemini with System Instruction and Low Temperature for Deterministic JSON
         response = client.models.generate_content(
-            model="gemini-3.5-flash",
+            model="gemini-3.8-flash",
             contents=prompt,
             config=types.GenerateContentConfig(
                 system_instruction=SYSTEM_INSTRUCTION,
