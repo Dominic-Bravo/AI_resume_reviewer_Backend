@@ -71,7 +71,7 @@ INSTALLED_APPS = [
 SITE_ID = 1
 
 # Tell allauth/dj-rest-auth to use your custom User model
-SOCIALACCOUNT_ADAPTER = "users.adapters.CustomSocialAccountAdapter"
+SOCIALACCOUNT_ADAPTER = "api.adapters.CustomSocialAccountAdapter"
 
 AUTHENTICATION_BACKENDS = [
     "django.contrib.auth.backends.ModelBackend",

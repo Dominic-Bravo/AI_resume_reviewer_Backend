@@ -370,6 +370,11 @@ class ScanResultDetailView(APIView):
         return Response(serializer.data, status=status.HTTP_200_OK)
 
 
+@extend_schema(
+    summary="Get User Scan History",
+    description="Retrieves a list of resumes and their scan history for the authenticated user.",
+    tags=["Resume Pipeline"],
+)
 class UserScanHistoryView(generics.ListAPIView):
     serializer_class = ResumeHistorySerializer
     permission_classes = (permissions.IsAuthenticated,)
