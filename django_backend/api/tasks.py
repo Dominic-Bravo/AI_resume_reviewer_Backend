@@ -1,6 +1,7 @@
 import os
 
 from celery import shared_task
+from celery.exceptions import Retry
 from google import genai
 from google.genai import types
 from pydantic import BaseModel, ConfigDict, Field
@@ -83,7 +84,7 @@ def run_ai_review_task(self, scan_report_id):
         # Initialize client with a proper 60-second timeout in milliseconds
         client = genai.Client(
             api_key=os.environ.get("GEMINI_API_KEY"),
-            http_options=types.HttpOptions(timeout=60_000),
+            http_options=types.HttpOptions(timeout=120_000),
         )
 
         prompt = f"""
@@ -116,7 +117,7 @@ Evaluation Guidelines:
 
         print("--- Calling Gemini API ---")
         response = client.models.generate_content(
-            model="gemini-3.8-flash",  # Updated to stable production flash alias
+            model="gemini-3.5-flash",  # Updated to stable production flash alias
             contents=prompt,
             config=types.GenerateContentConfig(
                 system_instruction=SYSTEM_INSTRUCTION,
@@ -143,6 +144,10 @@ Evaluation Guidelines:
         scan_report.status = ScanReport.Status.DONE
         scan_report.save()
         print(f"--- Scan {scan_report_id} completed successfully ---")
+
+    except Retry:
+        # Always let Celery's Retry exception propagate untouched
+        raise
 
     except Exception as exc:
         print(f"--- ERROR in AI review task: {exc} ---")
