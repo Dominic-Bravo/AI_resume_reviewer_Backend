@@ -81,7 +81,6 @@ class ResumeService:
             file_hash=file_hash,
             defaults={
                 "file_name": uploaded_file.name,
-                "file": uploaded_file,
                 "parsed_text": extracted_text,
             },
         )
@@ -89,7 +88,6 @@ class ResumeService:
         # If the resume already existed but the file name changed or text was updated, update it
         if not created:
             resume.file_name = uploaded_file.name
-            resume.file = uploaded_file
             resume.parsed_text = extracted_text
             resume.save()
 

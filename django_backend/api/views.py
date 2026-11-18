@@ -5,7 +5,7 @@ from dj_rest_auth.registration.views import SocialLoginView
 from django.conf import settings
 from django.middleware.csrf import get_token
 from drf_spectacular.utils import OpenApiResponse, extend_schema
-from rest_framework import permissions, serializers, status
+from rest_framework import generics, permissions, serializers, status
 from rest_framework.exceptions import APIException, ValidationError
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
@@ -18,6 +18,7 @@ from api.models import Resume, ScanReport
 from api.serializers import (
     LoginSerializer,
     RegisterSerializer,
+    ResumeHistorySerializer,
     ScanReportSerializer,
     UploadResumeSerializer,
     UserMeSerializer,
@@ -367,3 +368,15 @@ class ScanResultDetailView(APIView):
 
         serializer = ScanReportSerializer(scan_report)
         return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+class UserScanHistoryView(generics.ListAPIView):
+    serializer_class = ResumeHistorySerializer
+    permission_classes = (permissions.IsAuthenticated,)
+
+    def get_queryset(self):
+        return (
+            Resume.objects.filter(user=self.request.user)
+            .prefetch_related("scans")
+            .order_by("-created_at")
+        )

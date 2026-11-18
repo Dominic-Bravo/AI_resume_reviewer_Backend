@@ -9,6 +9,7 @@ from api.views import (
     ScanResultDetailView,
     TokenRefreshAPIView,
     UploadResumeView,
+    UserScanHistoryView,
 )
 
 router = DefaultRouter()
@@ -20,6 +21,7 @@ urlpatterns = [
     path("login/", LoginAPIView.as_view(), name="login"),
     path("token/refresh/", TokenRefreshAPIView.as_view(), name="token_refresh"),
     path("auth/google/", GoogleLoginAPIView.as_view(), name="google_login"),
+    path("scans/history/", UserScanHistoryView.as_view(), name="scan-history"),
     path("logout/", LogoutAPIView.as_view(), name="logout"),
     path("api/v1/upload-resume/", UploadResumeView.as_view(), name="upload-resume"),
     path(

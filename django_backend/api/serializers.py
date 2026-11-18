@@ -3,7 +3,7 @@ from django.db import transaction
 from drf_spectacular.utils import extend_schema_field
 from rest_framework import serializers
 
-from api.models import ScanReport
+from api.models import Resume, ScanReport
 
 User = get_user_model()
 
@@ -189,3 +189,17 @@ class ScanReportSerializer(serializers.ModelSerializer):
     )
     def get_category_scores(self, obj):
         return obj.category_scores
+
+
+class ResumeHistorySerializer(serializers.ModelSerializer):
+    # Reverse relationship from ForeignKey(Resume, related_name="scan_reports")
+    scan_reports = ScanReportSerializer(source="scans", many=True, read_only=True)
+
+    class Meta:
+        model = Resume
+        fields = (
+            "id",
+            "file_name",
+            "created_at",
+            "scan_reports",
+        )
