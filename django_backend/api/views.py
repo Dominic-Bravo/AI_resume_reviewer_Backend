@@ -273,7 +273,7 @@ class UploadResumeView(APIView):
     serializer_class = UploadResumeSerializer
 
     @extend_schema(
-        summary="Upload and Scan Resume (Idempotent)",
+        summary="Upload and Scan Resume",
         request={
             "multipart/form-data": {
                 "type": "object",
@@ -281,7 +281,7 @@ class UploadResumeView(APIView):
                     "file": {
                         "type": "string",
                         "format": "binary",
-                        "description": "PDF resume file",
+                        "description": "PDF or DOCX resume file",
                     },
                     "target_job_title": {
                         "type": "string",
@@ -313,32 +313,25 @@ class UploadResumeView(APIView):
         )
 
         try:
+            # 1. Compute hash and extract text
             file_hash = ResumeService.compute_file_hash(uploaded_file)
-
-            # Check Idempotency
-            existing_resume = Resume.objects.filter(
-                file_hash=file_hash, user=user
-            ).first()
-            if existing_resume:
-                data, http_status = ResumeService.handle_idempotent_hit(existing_resume)
-                return Response(data, status=http_status)
-
-            # Extract Text & Process New Scan
             extracted_text = ResumeService.extract_resume_text(uploaded_file)
-            resume, scan_report = ResumeService.process_new_resume(
-                user,
-                uploaded_file,
-                file_hash,
-                extracted_text,
-                target_job_title,
-                target_job_desc,
+
+            # 2. Process upload (handles saving/updating resume and always triggers a fresh scan)
+            resume, scan_report = ResumeService.process_resume_upload(
+                user=user,
+                uploaded_file=uploaded_file,
+                file_hash=file_hash,
+                extracted_text=extracted_text,
+                job_title=target_job_title,
+                job_desc=target_job_desc,
             )
 
             return Response(
                 {
                     "message": "Resume uploaded successfully. Analysis in progress.",
                     "resume_id": resume.id,
-                    "scan_id": scan_report.id,
+                    "scan_id": str(scan_report.id),
                     "status": scan_report.status,
                     "remaining_credits": user.credits,
                 },

@@ -1,6 +1,8 @@
 # api/services.py
+# api/services.py
 import hashlib
 
+import docx
 import pypdf
 from django.db import transaction
 from rest_framework.exceptions import APIException, ValidationError
@@ -49,40 +51,20 @@ class ResumeService:
         return extracted_text
 
     @staticmethod
-    def handle_idempotent_hit(existing_resume):
-        latest_scan = existing_resume.scans.order_by("-created_at").first()
-
-        if latest_scan and latest_scan.status == ScanReport.Status.FAILED:
-            latest_scan.status = ScanReport.Status.PENDING
-            latest_scan.save(update_fields=["status"])
-            run_ai_review_task.delay(latest_scan.id)
-
-            return {
-                "message": "Previous scan failed. Retrying AI analysis...",
-                "resume_id": existing_resume.id,
-                "scan_id": latest_scan.id,
-                "status": "PENDING",
-            }, 200
-
-        return {
-            "message": "Idempotent hit: Resume already exists. No credits deducted.",
-            "resume_id": existing_resume.id,
-            "scan_id": latest_scan.id if latest_scan else None,
-            "status": latest_scan.status if latest_scan else "UNKNOWN",
-            "cached": True,
-        }, 200
-
-    @staticmethod
     @transaction.atomic
-    def process_new_resume(
+    def process_resume_upload(
         user, uploaded_file, file_hash, extracted_text, job_title, job_desc
     ):
+        """
+        Handles both new resumes and re-scans of existing resume files against new/updated job targets.
+        Deducts credits and always creates a fresh ScanReport.
+        """
         if user.credits < 1:
             raise APIException(
-                "Insufficient credits. Please top up to analyze new resumes.", code=402
+                "Insufficient credits. Please top up to analyze resumes.", code=402
             )
 
-        # Deduct credit
+        # Deduct credit for the new scan
         user.credits -= 1
         user.save(update_fields=["credits"])
 
@@ -90,17 +72,28 @@ class ResumeService:
             user=user,
             credits_added=-1,
             amount_cents=0,
-            description=f"Resume scan deduction for {uploaded_file.name}",
+            description=f"Resume scan deduction for {uploaded_file.name} ({job_title or 'General Role'})",
         )
 
-        # Create records
-        resume = Resume.objects.create(
+        # Get or create the resume record based on file hash and user
+        resume, created = Resume.objects.get_or_create(
             user=user,
-            file_name=uploaded_file.name,
             file_hash=file_hash,
-            parsed_text=extracted_text,
+            defaults={
+                "file_name": uploaded_file.name,
+                "file": uploaded_file,
+                "parsed_text": extracted_text,
+            },
         )
 
+        # If the resume already existed but the file name changed or text was updated, update it
+        if not created:
+            resume.file_name = uploaded_file.name
+            resume.file = uploaded_file
+            resume.parsed_text = extracted_text
+            resume.save()
+
+        # ALWAYS create a brand new ScanReport so re-scans trigger fresh AI runs
         scan_report = ScanReport.objects.create(
             resume=resume,
             target_job_title=job_title,
