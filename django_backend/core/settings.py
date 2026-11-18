@@ -111,7 +111,7 @@ REST_FRAMEWORK = {
 REST_AUTH = {
     "USE_JWT": True,
     "JWT_AUTH_HTTPONLY": False,  # Handled via custom response/cookie helper
-    "USER_DETAILS_SERIALIZER": "users.serializers.UserMeSerializer",
+    "USER_DETAILS_SERIALIZER": "api.serializers.UserMeSerializer",
 }
 
 # --- Allauth Account & OAuth Settings ---
@@ -157,6 +157,7 @@ SOCIALACCOUNT_PROVIDERS = {
     },
 }
 
+FRONTEND_URL = os.getenv("FRONTEND_URL", "http://127.0.0.1:3000")
 
 MIDDLEWARE = [
     "corsheaders.middleware.CorsMiddleware",  # Place as high as possible
@@ -203,7 +204,7 @@ CSRF_COOKIE_HTTP_ONLY = (
     False  # Set to False so frontend JavaScript can read the CSRF token from cookie
 )
 CSRF_COOKIE_SAMESITE = "Lax"
-CSRF_COOKIE_SECURE = not os.getenv("DEBUG", "True") == "True"
+CSRF_COOKIE_SECURE = os.getenv("DEBUG", "True") != "True"
 
 
 CELERY_BROKER_URL = "redis://redis:6379/0"

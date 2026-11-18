@@ -1,4 +1,7 @@
 import redis
+from allauth.socialaccount.providers.google.views import GoogleOAuth2Adapter
+from allauth.socialaccount.providers.oauth2.client import OAuth2Client
+from dj_rest_auth.registration.views import SocialLoginView
 from django.conf import settings
 from django.middleware.csrf import get_token
 from drf_spectacular.utils import extend_schema
@@ -21,6 +24,48 @@ from api.serializers import (
     UserResponseSerializer,
 )
 from api.services import ResumeService
+
+
+class BaseCustomSocialLoginView(SocialLoginView):
+    permission_classes = (permissions.AllowAny,)
+
+    def get_response(self):
+        """
+        Custom response structure matching standard login:
+        Returns access token in JSON and attaches refresh token in HttpOnly cookie.
+        """
+        original_response = super().get_response()
+
+        access_token = original_response.data.get("access")
+        refresh_token = original_response.data.get("refresh")
+        user_data = UserMeSerializer(self.user).data
+
+        custom_response = Response(
+            {
+                "access": access_token,
+                "user": user_data,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+        if refresh_token:
+            set_refresh_cookie(custom_response, refresh_token)
+
+        return custom_response
+
+
+class GoogleLoginAPIView(BaseCustomSocialLoginView):
+    adapter_class = GoogleOAuth2Adapter
+    client_class = OAuth2Client
+    callback_url = f"{settings.FRONTEND_URL}/accounts/google/login/callback"
+
+    @extend_schema(
+        summary="Google OAuth2 Login",
+        description="Accepts Google OAuth code/token and authenticates or registers user.",
+        tags=["Authentication"],
+    )
+    def post(self, request, *args, **kwargs):
+        return super().post(request, *args, **kwargs)
 
 
 def set_refresh_cookie(response: Response, refresh_token: str) -> None:
