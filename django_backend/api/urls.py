@@ -4,6 +4,7 @@ from rest_framework.routers import DefaultRouter
 from api.views import (
     GoogleLoginAPIView,
     LoginAPIView,
+    LogoutAPIView,
     RegisterAPIView,
     ScanResultDetailView,
     TokenRefreshAPIView,
@@ -19,6 +20,7 @@ urlpatterns = [
     path("login/", LoginAPIView.as_view(), name="login"),
     path("token/refresh/", TokenRefreshAPIView.as_view(), name="token_refresh"),
     path("auth/google/", GoogleLoginAPIView.as_view(), name="google_login"),
+    path("logout/", LogoutAPIView.as_view(), name="logout"),
     path("api/v1/upload-resume/", UploadResumeView.as_view(), name="upload-resume"),
     path(
         "api/v1/scans/<uuid:scan_id>/",

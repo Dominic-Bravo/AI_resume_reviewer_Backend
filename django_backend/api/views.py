@@ -4,7 +4,7 @@ from allauth.socialaccount.providers.oauth2.client import OAuth2Client
 from dj_rest_auth.registration.views import SocialLoginView
 from django.conf import settings
 from django.middleware.csrf import get_token
-from drf_spectacular.utils import extend_schema
+from drf_spectacular.utils import OpenApiResponse, extend_schema
 from rest_framework import permissions, serializers, status
 from rest_framework.exceptions import APIException, ValidationError
 from rest_framework.permissions import IsAuthenticated
@@ -140,6 +140,49 @@ class LoginAPIView(APIView):
 
         set_refresh_cookie(response, str(refresh))
         get_token(request)
+
+        return response
+
+
+class LogoutAPIView(APIView):
+    permission_classes = (permissions.IsAuthenticated,)
+
+    @extend_schema(
+        summary="Logout User",
+        tags=["Authentication"],
+        responses={
+            200: OpenApiResponse(description="Logout successful."),
+        },
+    )
+    def post(self, request, *args, **kwargs):
+        refresh_token = request.COOKIES.get(settings.SIMPLE_JWT["AUTH_COOKIE"])
+
+        if refresh_token:
+            try:
+                token = RefreshToken(refresh_token)
+                token.blacklist()
+            except TokenError:
+                pass
+
+        response = Response(
+            {"message": "Logout successful."},
+            status=status.HTTP_200_OK,
+        )
+
+        # Delete refresh cookie
+        response.delete_cookie(
+            key=settings.SIMPLE_JWT["AUTH_COOKIE"],
+            path=settings.SIMPLE_JWT["AUTH_COOKIE_PATH"],
+        )
+
+        # Delete access cookie if configured separately
+        access_cookie = settings.SIMPLE_JWT.get("AUTH_ACCESS_COOKIE")
+
+        if access_cookie:
+            response.delete_cookie(
+                key=access_cookie,
+                path=settings.SIMPLE_JWT.get("AUTH_ACCESS_COOKIE_PATH", "/"),
+            )
 
         return response
 

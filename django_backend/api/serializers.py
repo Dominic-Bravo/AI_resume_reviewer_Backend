@@ -85,6 +85,12 @@ class LoginSerializer(serializers.Serializer):
         return attrs
 
 
+class LogoutSerializer(serializers.Serializer):
+    refresh = serializers.CharField(
+        required=True, help_text="The refresh token to blacklist."
+    )
+
+
 class UserResponseSerializer(serializers.ModelSerializer):
     """Clean representation serializer for outputting created user details."""
 
