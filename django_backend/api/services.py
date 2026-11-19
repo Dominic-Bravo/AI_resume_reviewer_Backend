@@ -5,10 +5,10 @@ import hashlib
 import docx
 import pypdf
 from django.db import transaction
+from django.db.models import F
 from rest_framework.exceptions import APIException, ValidationError
 
 from .models import CreditTransaction, Resume, ScanReport
-from .tasks import run_ai_review_task
 
 
 class ResumeService:
@@ -57,23 +57,41 @@ class ResumeService:
     ):
         """
         Handles both new resumes and re-scans of existing resume files against new/updated job targets.
-        Deducts credits and always creates a fresh ScanReport.
+        Atomically deducts credits, creates a fresh ScanReport, and enqueues the AI review after commit.
         """
-        if user.credits < 1:
+        normalized_title = (job_title or "").strip()
+        normalized_desc = (job_desc or "").strip()
+
+        existing_resume = Resume.objects.filter(user=user, file_hash=file_hash).first()
+        if existing_resume:
+            inflight_scan = (
+                ScanReport.objects.filter(
+                    resume=existing_resume,
+                    target_job_title=normalized_title,
+                    target_job_desc=normalized_desc,
+                    status__in=[
+                        ScanReport.Status.PENDING,
+                        ScanReport.Status.PROCESSING,
+                    ],
+                )
+                .order_by("-id")
+                .first()
+            )
+            if inflight_scan:
+                return existing_resume, inflight_scan
+
+        # Atomic conditional deduction prevents two concurrent requests from overdrawing credits
+        updated_rows = (
+            type(user)
+            .objects.filter(pk=user.pk, credits__gte=1)
+            .update(credits=F("credits") - 1)
+        )
+        if not updated_rows:
             raise APIException(
                 "Insufficient credits. Please top up to analyze resumes.", code=402
             )
 
-        # Deduct credit for the new scan
-        user.credits -= 1
-        user.save(update_fields=["credits"])
-
-        CreditTransaction.objects.create(
-            user=user,
-            credits_added=-1,
-            amount_cents=0,
-            description=f"Resume scan deduction for {uploaded_file.name} ({job_title or 'General Role'})",
-        )
+        user.refresh_from_db(fields=["credits"])
 
         # Get or create the resume record based on file hash and user
         resume, created = Resume.objects.get_or_create(
@@ -85,11 +103,11 @@ class ResumeService:
             },
         )
 
-        # If the resume already existed but the file name changed or text was updated, update it
+        # If the resume already existed, keep filename and parsed_text current
         if not created:
             resume.file_name = uploaded_file.name
             resume.parsed_text = extracted_text
-            resume.save()
+            resume.save(update_fields=["file_name", "parsed_text"])
 
         # ALWAYS create a brand new ScanReport so re-scans trigger fresh AI runs
         scan_report = ScanReport.objects.create(
@@ -99,7 +117,62 @@ class ResumeService:
             status=ScanReport.Status.PENDING,
         )
 
-        # Trigger async Celery task
-        run_ai_review_task.delay(scan_report.id)
+        CreditTransaction.objects.create(
+            user=user,
+            credits_added=-1,
+            amount_cents=0,
+            description=(
+                f"Resume scan deduction for {uploaded_file.name} "
+                f"({job_title or 'General Role'}) [scan={scan_report.id}]"
+            ),
+        )
+
+        scan_id = scan_report.id
+
+        def _enqueue_scan():
+            from .tasks import run_ai_review_task
+
+            run_ai_review_task.delay(scan_id)
+
+        transaction.on_commit(_enqueue_scan)
 
         return resume, scan_report
+
+    @staticmethod
+    def refund_failed_scan_credit(scan_report_id) -> bool:
+        """
+        Atomically refunds 1 credit once when a scan permanently fails.
+        Returns True if a refund was issued, False if already refunded or not applicable.
+        """
+        refund_marker = f"[scan={scan_report_id}] (refund)"
+
+        with transaction.atomic():
+            scan_report = (
+                ScanReport.objects.select_related("resume__user")
+                .filter(pk=scan_report_id)
+                .first()
+            )
+            if not scan_report or not scan_report.resume_id:
+                return False
+
+            user = scan_report.resume.user
+
+            already_refunded = CreditTransaction.objects.filter(
+                user=user,
+                description__endswith=refund_marker,
+            ).exists()
+            if already_refunded:
+                return False
+
+            type(user).objects.filter(pk=user.pk).update(credits=F("credits") + 1)
+
+            CreditTransaction.objects.create(
+                user=user,
+                credits_added=1,
+                amount_cents=0,
+                description=(
+                    f"Credit refund for failed scan on {scan_report.resume.file_name} "
+                    f"{refund_marker}"
+                ),
+            )
+            return True
