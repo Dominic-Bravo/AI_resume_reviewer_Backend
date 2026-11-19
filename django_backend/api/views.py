@@ -385,3 +385,19 @@ class UserScanHistoryView(generics.ListAPIView):
             .prefetch_related("scans")
             .order_by("-created_at")
         )
+
+
+class UserCreditBalanceView(APIView):
+    permission_classes = (permissions.IsAuthenticated,)
+    serializer_class = UserMeSerializer
+
+    @extend_schema(
+        summary="Get current user's credit balance",
+        responses={200: UserMeSerializer},
+        tags=["Authentication"],
+    )
+    def get(self, request, *args, **kwargs):
+        # Refresh from DB if needed so newly deducted/added credits are always accurate
+        request.user.refresh_from_db(fields=["credits"])
+        serializer = self.serializer_class(request.user, context={"request": request})
+        return Response(serializer.data, status=status.HTTP_200_OK)
