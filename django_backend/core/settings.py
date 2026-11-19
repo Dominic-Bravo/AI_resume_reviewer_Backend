@@ -105,6 +105,15 @@ REST_FRAMEWORK = {
     "DEFAULT_PERMISSION_CLASSES": (
         "rest_framework.permissions.IsAuthenticatedOrReadOnly",
     ),
+    "DEFAULT_THROTTLE_CLASSES": [
+        "rest_framework.throttling.AnonRateThrottle",
+        "rest_framework.throttling.UserRateThrottle",
+    ],
+    "DEFAULT_THROTTLE_RATES": {
+        "anon": "30/minute",  # Unauthenticated requests (e.g., login/auth)
+        "user": "120/minute",  # General authenticated requests (history, credits)
+        "resume_upload": "10/hour",  # Strict cap on heavy AI scan uploads per user
+    },
 }
 
 # Integrate SimpleJWT with dj-rest-auth
@@ -210,7 +219,13 @@ CSRF_COOKIE_SECURE = os.getenv("DEBUG", "True") != "True"
 CELERY_BROKER_URL = "redis://redis:6379/0"
 CELERY_RESULT_BACKEND = "redis://redis:6379/0"
 
-
+# core/settings.py
+CACHES = {
+    "default": {
+        "BACKEND": "django.core.cache.backends.redis.RedisCache",
+        "LOCATION": "redis://redis:6379/1",  # Use DB /1 so cache stays separate from Celery's /0
+    }
+}
 # Database
 # https://docs.djangoproject.com/en/6.1/ref/settings/#databases
 

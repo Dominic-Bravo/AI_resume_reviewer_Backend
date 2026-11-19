@@ -24,10 +24,10 @@ urlpatterns = [
     path("auth/google/", GoogleLoginAPIView.as_view(), name="google_login"),
     path("scans/history/", UserScanHistoryView.as_view(), name="scan-history"),
     path("logout/", LogoutAPIView.as_view(), name="logout"),
-    path("api/v1/upload-resume/", UploadResumeView.as_view(), name="upload-resume"),
+    path("upload-resume/", UploadResumeView.as_view(), name="upload-resume"),
     path("credits/", UserCreditBalanceView.as_view(), name="user-credits"),
     path(
-        "api/v1/scans/<uuid:scan_id>/",
+        "scans/<uuid:scan_id>/",
         ScanResultDetailView.as_view(),
         name="scan-detail",
     ),

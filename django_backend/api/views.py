@@ -25,6 +25,7 @@ from api.serializers import (
     UserResponseSerializer,
 )
 from api.services import ResumeService
+from api.throttles import ResumeUploadThrottle
 
 
 class BaseCustomSocialLoginView(SocialLoginView):
@@ -272,6 +273,7 @@ redis_client = redis.Redis.from_url(
 
 class UploadResumeView(APIView):
     serializer_class = UploadResumeSerializer
+    throttle_classes = (ResumeUploadThrottle,)
 
     @extend_schema(
         summary="Upload and Scan Resume",
