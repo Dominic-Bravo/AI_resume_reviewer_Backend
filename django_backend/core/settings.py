@@ -50,7 +50,7 @@ AUTHENTICATION_BACKENDS = [
 # Application definition
 
 INSTALLED_APPS = [
-    "unfold",  
+    "unfold",
     "django.contrib.admin",
     "django.contrib.auth",
     "django.contrib.contenttypes",
@@ -76,20 +76,37 @@ INSTALLED_APPS = [
 ]
 
 UNFOLD = {
-    "SITE_TITLE": "AI Resume Reviewer Admin",
-    "SITE_HEADER": "AI Resume Reviewer",
-    "SITE_SUBHEADER": "Resumes, AI Scans & Credits",
-    "SHOW_HISTORY": True,
-    # Optional: customize primary/accent shades to match your frontend palette
-    # "COLORS": {
-    #     "primary": {
-    #         "50": "240 253 250",
-    #         "100": "204 251 241",
-    #         "500": "20 184 166",
-    #         "600": "13 148 136",
-    #         "700": "15 118 110",
-    #     },
-    # },
+    "SITE_TITLE": "RoleMatch Admin",
+    "SITE_HEADER": "RoleMatch",
+    "SITE_SUBHEADER": "AI Resume & Role Alignment",
+    "COLORS": {
+        "base": {
+            "50": "250, 250, 250",
+            "100": "244, 244, 245",
+            "200": "228, 228, 231",
+            "300": "212, 212, 216",
+            "400": "161, 161, 170",
+            "500": "113, 113, 122",
+            "600": "82, 82, 91",
+            "700": "63, 63, 70",
+            "800": "39, 39, 42",
+            "900": "24, 24, 27",
+            "950": "9, 9, 11",
+        },
+        "primary": {
+            "50": "250, 250, 250",
+            "100": "244, 244, 245",
+            "200": "228, 228, 231",
+            "300": "212, 212, 216",
+            "400": "161, 161, 170",
+            "500": "38, 38, 38",
+            "600": "28, 28, 28",
+            "700": "23, 23, 23",
+            "800": "20, 20, 20",
+            "900": "15, 15, 15",
+            "950": "10, 10, 10",
+        },
+    },
 }
 
 SITE_ID = 1
