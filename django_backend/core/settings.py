@@ -50,6 +50,7 @@ AUTHENTICATION_BACKENDS = [
 # Application definition
 
 INSTALLED_APPS = [
+    "unfold",  
     "django.contrib.admin",
     "django.contrib.auth",
     "django.contrib.contenttypes",
@@ -73,6 +74,23 @@ INSTALLED_APPS = [
     "rest_framework",
     "api",
 ]
+
+UNFOLD = {
+    "SITE_TITLE": "AI Resume Reviewer Admin",
+    "SITE_HEADER": "AI Resume Reviewer",
+    "SITE_SUBHEADER": "Resumes, AI Scans & Credits",
+    "SHOW_HISTORY": True,
+    # Optional: customize primary/accent shades to match your frontend palette
+    # "COLORS": {
+    #     "primary": {
+    #         "50": "240 253 250",
+    #         "100": "204 251 241",
+    #         "500": "20 184 166",
+    #         "600": "13 148 136",
+    #         "700": "15 118 110",
+    #     },
+    # },
+}
 
 SITE_ID = 1
 

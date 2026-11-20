@@ -1,4 +1,5 @@
 import uuid
+from typing import ClassVar
 
 from django.contrib.auth.models import AbstractUser, BaseUserManager
 from django.db import models
@@ -10,7 +11,7 @@ class UserManager(BaseUserManager):
         if not email:
             raise ValueError("The Email field must be set")
         email = self.normalize_email(email)
-        user = self.model(email=email, **extra_fields)
+        user = self.model(email=email, **extra_fields)  
         user.set_password(password)
         user.save(using=self._db)
         return user
@@ -29,10 +30,10 @@ class User(AbstractUser):
     credits = models.IntegerField(default=1)
     created_at = models.DateTimeField(auto_now_add=True)
 
-    objects = UserManager()
+    objects = UserManager() # type: ignore[assignment]
 
     USERNAME_FIELD = "email"
-    REQUIRED_FIELDS = ()  # No extra fields required when running createsuperuser
+    REQUIRED_FIELDS: ClassVar[list[str]] = [] # No extra fields required when running createsuperuser
 
     def __str__(self):
         return self.email

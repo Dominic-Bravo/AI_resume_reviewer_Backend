@@ -1,4 +1,5 @@
 import io
+from collections.abc import Mapping
 from unittest.mock import patch
 
 import docx
@@ -6,11 +7,16 @@ import pypdf
 from django.contrib.auth import get_user_model
 from django.core.cache import cache
 from django.core.files.uploadedfile import SimpleUploadedFile
+from django.http import HttpResponse
 from django.urls import reverse
 from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
 from rest_framework import status
+from rest_framework.response import Response
 from rest_framework.settings import api_settings
 from rest_framework.test import APIClient, APITestCase
+
+# Adjust 'users.models' to whichever app defines your custom User model
+from api.models import User as CustomUser
 
 from .models import CreditTransaction, Resume, ScanReport
 from .services import MAX_RESUME_FILE_SIZE_BYTES, ResumeService
@@ -24,27 +30,29 @@ class ResumeUploadThrottleTests(APITestCase):
     def setUp(self):
         cache.clear()
         self.user = User.objects.create_user(
+            username="throttle-test",
             email="throttle-test@example.com",
             password="StrongPassword123!",
             credits=0,
-        )
+)
         self.client = APIClient(REMOTE_ADDR="127.0.0.1")
         self.client.force_authenticate(user=self.user)
         self.upload_url = reverse("users:upload-resume")
 
     def tearDown(self):
         cache.clear()
-        ResumeUploadThrottle.rate = None
 
     def test_upload_endpoint_throttles_after_limit(self):
-        ResumeUploadThrottle.rate = "2/minute"
         test_rates = {
             "anon": "30/minute",
             "user": "120/minute",
             "resume_upload": "2/minute",
         }
 
-        with patch.object(api_settings, "DEFAULT_THROTTLE_RATES", test_rates):
+        with (
+            patch.object(ResumeUploadThrottle, "rate", "2/minute", create=True),
+            patch.object(api_settings, "DEFAULT_THROTTLE_RATES", test_rates),
+        ):
             for i in range(2):
                 response = self.client.post(self.upload_url, {}, format="multipart")
                 self.assertNotEqual(
@@ -54,6 +62,8 @@ class ResumeUploadThrottleTests(APITestCase):
                 )
 
             response = self.client.post(self.upload_url, {}, format="multipart")
+            assert isinstance(response, Response)
+            assert isinstance(response.data, Mapping)
             self.assertEqual(
                 response.status_code,
                 status.HTTP_429_TOO_MANY_REQUESTS,
@@ -62,13 +72,13 @@ class ResumeUploadThrottleTests(APITestCase):
             self.assertIn("detail", response.data)
 
     def test_throttling_is_isolated_per_user(self):
-        ResumeUploadThrottle.rate = "1/minute"
         test_rates = {
             "anon": "30/minute",
             "user": "120/minute",
             "resume_upload": "1/minute",
         }
         other_user = User.objects.create_user(
+            username="throttle-user-b",
             email="throttle-user-b@example.com",
             password="StrongPassword123!",
             credits=0,
@@ -76,16 +86,22 @@ class ResumeUploadThrottleTests(APITestCase):
         other_client = APIClient(REMOTE_ADDR="127.0.0.1")
         other_client.force_authenticate(user=other_user)
 
-        with patch.object(api_settings, "DEFAULT_THROTTLE_RATES", test_rates):
+        with (
+            patch.object(ResumeUploadThrottle, "rate", "1/minute", create=True),
+            patch.object(api_settings, "DEFAULT_THROTTLE_RATES", test_rates),
+        ):
             # User A uses their quota and gets throttled on the 2nd request
             first = self.client.post(self.upload_url, {}, format="multipart")
+            assert isinstance(first, HttpResponse)
             self.assertNotEqual(first.status_code, status.HTTP_429_TOO_MANY_REQUESTS)
 
             throttled = self.client.post(self.upload_url, {}, format="multipart")
+            assert isinstance(throttled, HttpResponse)
             self.assertEqual(throttled.status_code, status.HTTP_429_TOO_MANY_REQUESTS)
 
             # User B should still have a fresh bucket
             other_resp = other_client.post(self.upload_url, {}, format="multipart")
+            assert isinstance(other_resp, HttpResponse)
             self.assertNotEqual(
                 other_resp.status_code, status.HTTP_429_TOO_MANY_REQUESTS
             )
@@ -96,11 +112,13 @@ class ResumeUploadServiceTests(APITestCase):
         cache.clear()
         self.upload_url = reverse("users:upload-resume")
         self.user_with_credits = User.objects.create_user(
+            username="credits-yes",
             email="credits-yes@example.com",
             password="StrongPassword123!",
             credits=3,
         )
         self.user_no_credits = User.objects.create_user(
+            username="credits-no",
             email="credits-no@example.com",
             password="StrongPassword123!",
             credits=0,
@@ -108,7 +126,7 @@ class ResumeUploadServiceTests(APITestCase):
 
     def tearDown(self):
         cache.clear()
-        ResumeUploadThrottle.rate = None
+        ResumeUploadThrottle.rate = None  # type: ignore[attr-defined]
 
     def _sample_pdf(self):
         content = (
@@ -118,12 +136,14 @@ class ResumeUploadServiceTests(APITestCase):
         return SimpleUploadedFile("resume.pdf", content, content_type="application/pdf")
 
     def test_upload_rejected_when_user_has_no_credits(self):
+        assert isinstance(self.client, APIClient)
         self.client.force_authenticate(user=self.user_no_credits)
         response = self.client.post(
             self.upload_url,
             {"file": self._sample_pdf()},
             format="multipart",
         )
+        assert isinstance(response, HttpResponse)
         self.assertIn(
             response.status_code,
             [
@@ -132,6 +152,7 @@ class ResumeUploadServiceTests(APITestCase):
                 status.HTTP_403_FORBIDDEN,
             ],
         )
+        assert isinstance(self.user_no_credits, CustomUser)
         self.user_no_credits.refresh_from_db()
         self.assertEqual(self.user_no_credits.credits, 0)
 
@@ -144,19 +165,21 @@ class ResumeUploadServiceTests(APITestCase):
     def test_valid_upload_deducts_credit_and_queues_task(
         self, _mock_extract, mock_task_delay
     ):
+        assert isinstance(self.client, APIClient)
         self.client.force_authenticate(user=self.user_with_credits)
-        with self.captureOnCommitCallbacks(execute=True):
+        with self.captureOnCommitCallbacks(execute=True): # type: ignore[attr-defined]
             response = self.client.post(
                 self.upload_url,
                 {"file": self._sample_pdf()},
                 format="multipart",
             )
+        assert isinstance(response, HttpResponse)
         self.assertIn(
             response.status_code,
             [status.HTTP_200_OK, status.HTTP_201_CREATED, status.HTTP_202_ACCEPTED],
         )
         self.user_with_credits.refresh_from_db()
-        self.assertEqual(self.user_with_credits.credits, 2)
+        self.assertEqual(self.user_with_credits.credits, 2)  # type: ignore[attr-defined]
         mock_task_delay.assert_called_once()
 
 
@@ -165,11 +188,13 @@ class ResumeResilienceTests(APITestCase):
         cache.clear()
         self.upload_url = reverse("users:upload-resume")
         self.user = User.objects.create_user(
+            username="resilience-a",
             email="resilience-a@example.com",
             password="StrongPassword123!",
             credits=5,
         )
         self.other_user = User.objects.create_user(
+            username="resilience-b",
             email="resilience-b@example.com",
             password="StrongPassword123!",
             credits=5,
@@ -179,7 +204,7 @@ class ResumeResilienceTests(APITestCase):
 
     def tearDown(self):
         cache.clear()
-        ResumeUploadThrottle.rate = None
+        ResumeUploadThrottle.rate = None  # type: ignore[attr-defined]
 
     def _pdf_file(self, name="resume.pdf", payload=b"%PDF-1.4\n%%EOF\n"):
         return SimpleUploadedFile(name, payload, content_type="application/pdf")
@@ -266,7 +291,7 @@ class ResumeResilienceTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
 
         self.user.refresh_from_db()
-        self.assertEqual(self.user.credits, 5)
+        self.assertEqual(self.user.credits, 5) # type: ignore[attr-defined]
         self.assertEqual(ScanReport.objects.count(), 0)
 
     def test_rejects_oversized_file_without_deducting_credits(self):
@@ -281,7 +306,7 @@ class ResumeResilienceTests(APITestCase):
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
 
         self.user.refresh_from_db()
-        self.assertEqual(self.user.credits, 5)
+        self.assertEqual(self.user.credits, 5) # type: ignore[attr-defined]
 
     @patch("api.tasks.run_ai_review_task.delay")
     @patch.object(
@@ -296,13 +321,13 @@ class ResumeResilienceTests(APITestCase):
             "target_job_desc": "Build APIs",
         }
 
-        with self.captureOnCommitCallbacks(execute=True):
+        with self.captureOnCommitCallbacks(execute=True): # type: ignore[attr-defined]
             first_resp = self.client.post(self.upload_url, payload, format="multipart")
         self.assertEqual(first_resp.status_code, status.HTTP_201_CREATED)
-        first_scan_id = first_resp.data["scan_id"]
-
+        first_scan_id = first_resp.data["scan_id"] # type: ignore[attr-defined]
+ 
         second_file = self._pdf_file()
-        with self.captureOnCommitCallbacks(execute=True):
+        with self.captureOnCommitCallbacks(execute=True): # type: ignore[attr-defined]
             second_resp = self.client.post(
                 self.upload_url,
                 {
@@ -313,10 +338,10 @@ class ResumeResilienceTests(APITestCase):
                 format="multipart",
             )
         self.assertEqual(second_resp.status_code, status.HTTP_201_CREATED)
-        self.assertEqual(second_resp.data["scan_id"], first_scan_id)
+        self.assertEqual(second_resp.data["scan_id"], first_scan_id) # type: ignore[attr-defined]
 
         self.user.refresh_from_db()
-        self.assertEqual(self.user.credits, 4)
+        self.assertEqual(self.user.credits, 4) # type: ignore[attr-defined]
         self.assertEqual(ScanReport.objects.count(), 1)
         mock_delay.assert_called_once()
 
@@ -333,7 +358,7 @@ class ResumeResilienceTests(APITestCase):
             target_job_desc="Desc",
             status=ScanReport.Status.FAILED,
         )
-        self.user.credits = 4
+        self.user.credits = 4 # type: ignore[attr-defined]
         self.user.save(update_fields=["credits"])
 
         first_refund = ResumeService.refund_failed_scan_credit(scan.id)
@@ -343,7 +368,7 @@ class ResumeResilienceTests(APITestCase):
         self.assertFalse(second_refund)
 
         self.user.refresh_from_db()
-        self.assertEqual(self.user.credits, 5)
+        self.assertEqual(self.user.credits, 5) # type: ignore[attr-defined]
         refund_txns = CreditTransaction.objects.filter(
             user=self.user, credits_added=1
         ).count()
@@ -369,7 +394,7 @@ class ResumeResilienceTests(APITestCase):
 
         detail_url = reverse("users:scan-detail", kwargs={"scan_id": scan.id})
         resp = other_client.get(detail_url)
-        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
+        self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND) # type: ignore[attr-defined]
 
     @patch("api.tasks.OpenAI")
     def test_run_ai_review_task_skips_already_done_scan(self, mock_openai_cls):
@@ -403,7 +428,7 @@ class ResumeResilienceTests(APITestCase):
             "OpenRouter 503 Service Unavailable"
         )
 
-        self.user.credits = 4
+        self.user.credits = 4  # type: ignore[attr-defined]
         self.user.save(update_fields=["credits"])
 
         resume = Resume.objects.create(
@@ -419,15 +444,17 @@ class ResumeResilienceTests(APITestCase):
             status=ScanReport.Status.PENDING,
         )
 
-        with patch.object(run_ai_review_task, "max_retries", 0):
-            with self.assertRaises(RuntimeError):
-                run_ai_review_task.apply(args=[str(scan.id)]).get()
+        with (
+            patch.object(run_ai_review_task, "max_retries", 0),
+            self.assertRaises(RuntimeError),
+        ):
+            run_ai_review_task.apply(args=[str(scan.id)]).get() # type: ignore[attr-defined]
 
         scan.refresh_from_db()
         self.assertEqual(scan.status, ScanReport.Status.FAILED)
 
         self.user.refresh_from_db()
-        self.assertEqual(self.user.credits, 5)
+        self.assertEqual(self.user.credits, 5)  # type: ignore[attr-defined]
 
         refund_count = CreditTransaction.objects.filter(
             user=self.user, credits_added=1
@@ -498,7 +525,7 @@ class ResumeResilienceTests(APITestCase):
             status=ScanReport.Status.PENDING,
         )
 
-        result = run_ai_review_task.apply(args=[str(scan.id)])
+        result = run_ai_review_task.apply(args=[str(scan.id)]) # type: ignore[attr-defined]
         self.assertTrue(result.successful())
 
         scan.refresh_from_db()

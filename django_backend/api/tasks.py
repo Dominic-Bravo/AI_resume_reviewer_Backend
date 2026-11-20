@@ -78,11 +78,10 @@ def _handle_task_failure(task, scan_report_id, exc) -> None:
         ResumeService.refund_failed_scan_credit(scan_report_id)
     except Retry:
         raise
-    except Exception as inner_exc:
+    except Exception:
         logger.exception(
-            "Failed to update status/refund credit after task failure | scan_report_id=%s err=%s",
+            "Failed to update status/refund credit after task failure | scan_report_id=%s",
             scan_report_id,
-            inner_exc,
         )
 
 
@@ -132,9 +131,17 @@ def run_ai_review_task(self, scan_report_id):
             ResumeService.refund_failed_scan_credit(scan_report_id)
             return
 
+        base_url = os.environ.get(
+            "OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"
+        )
+        model_name = os.environ.get(
+            "OPENROUTER_MODEL", "google/gemini-2.5-flash"
+        )
+        api_key = os.environ.get("OPENROUTER_API_KEY")
+
         client = OpenAI(
-            base_url="https://openrouter.ai/api/v1",
-            api_key=os.environ.get("OPENROUTER_API_KEY"),
+            base_url=base_url,
+            api_key=api_key,
             timeout=60.0,
         )
 
@@ -173,7 +180,7 @@ You MUST return a JSON object that strictly adheres to this JSON Schema:
         )
 
         completion = client.chat.completions.create(
-            model="google/gemini-2.5-flash",
+            model=model_name,
             messages=[
                 {"role": "system", "content": SYSTEM_INSTRUCTION},
                 {"role": "user", "content": prompt},
@@ -250,4 +257,4 @@ You MUST return a JSON object that strictly adheres to this JSON Schema:
             exc,
         )
         _handle_task_failure(self, scan_report_id, exc)
-        raise exc
+        raise 

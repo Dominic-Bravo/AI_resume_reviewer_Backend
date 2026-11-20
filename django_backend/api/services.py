@@ -1,10 +1,12 @@
 # api/services.py
 import hashlib
+import zipfile
 
 import docx
 import pypdf
 from django.db import IntegrityError, transaction
 from django.db.models import F
+from pypdf.errors import PdfStreamError
 from rest_framework.exceptions import APIException, ValidationError
 
 from .models import CreditTransaction, Resume, ScanReport
@@ -78,8 +80,16 @@ class ResumeService:
 
         except ValidationError:
             raise
-        except Exception as e:
-            raise ValidationError(f"Failed to parse document text: {str(e)}")
+        except (
+            PdfStreamError,
+            zipfile.BadZipFile,
+            KeyError,
+            ValueError,
+            OSError,
+        ) as exc:
+            raise ValidationError(
+                f"Failed to parse document text: {exc}"
+            ) from exc
 
         extracted_text = extracted_text.strip()
         if not extracted_text:
@@ -182,12 +192,12 @@ class ResumeService:
             ),
         )
 
-        scan_id = scan_report.id
+        scan_id = str(scan_report.id)
 
         def _enqueue_scan():
             from .tasks import run_ai_review_task
 
-            run_ai_review_task.delay(scan_id)
+            run_ai_review_task.delay(scan_id) # type: ignore[operator]
 
         transaction.on_commit(_enqueue_scan)
 
