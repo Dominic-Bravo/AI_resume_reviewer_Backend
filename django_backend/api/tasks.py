@@ -8,11 +8,11 @@ from openai import OpenAI
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from .models import ScanReport
+from .services import ResumeService
 
 logger = logging.getLogger(__name__)
 
 
-# 1. Replace dict[str, int] with an explicit key-value Pydantic model
 class CategoryScoreItem(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
@@ -22,7 +22,6 @@ class CategoryScoreItem(BaseModel):
     score: int = Field(description="Score from 0 to 100 for this category")
 
 
-# 1. Structured sub-model for section critiques
 class SectionCritique(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
@@ -40,7 +39,6 @@ class SectionCritique(BaseModel):
     )
 
 
-# 2. Main Pydantic Schema supporting dynamic dictionary keys for category_scores
 class ResumeAnalysisResponse(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
@@ -56,7 +54,6 @@ class ResumeAnalysisResponse(BaseModel):
     )
 
 
-# Hardened System Instruction enforcing boundary isolation and dynamic multi-industry evaluation
 SYSTEM_INSTRUCTION = (
     "You are an expert executive recruiter, hiring manager, and professional resume coach across all industries. "
     "Your function is to analyze the provided resume text against the target job description "
@@ -88,7 +85,7 @@ def run_ai_review_task(self, scan_report_id):
         scan_report.status = ScanReport.Status.PROCESSING
         scan_report.save(update_fields=["status"])
 
-        resume_text = scan_report.resume.parsed_text
+        resume_text = (scan_report.resume.parsed_text or "").strip()
         job_title = scan_report.target_job_title or "General Professional Role"
         job_desc = (
             scan_report.target_job_desc
@@ -100,18 +97,11 @@ def run_ai_review_task(self, scan_report_id):
                 "Empty resume parsed_text; skipping OpenRouter call and refunding | scan_report_id=%s",
                 scan_report_id,
             )
-        scan_report.status = ScanReport.Status.FAILED
-        scan_report.save(update_fields=["status"])
-
-        if scan_report:
             scan_report.status = ScanReport.Status.FAILED
             scan_report.save(update_fields=["status"])
+            ResumeService.refund_failed_scan_credit(scan_report_id)
+            return
 
-        from .services import ResumeService
-
-        ResumeService.refund_failed_scan_credit(scan_report_id)
-
-        # Explicit timeout prevents a hung upstream call from blocking a Celery worker
         client = OpenAI(
             base_url="https://openrouter.ai/api/v1",
             api_key=os.environ.get("OPENROUTER_API_KEY"),
@@ -186,11 +176,8 @@ You MUST return a JSON object that strictly adheres to this JSON Schema:
         logger.info(
             "OpenRouter API response received | scan_report_id=%s", scan_report_id
         )
-        raw_content = completion.choices[0].message.content
-        result_data = ResumeAnalysisResponse.model_validate_json(raw_content)
 
         scan_report.overall_score = result_data.overall_score
-        # Convert list[CategoryScoreItem] -> dict[str, int] for your JSONField & Serializer
         scan_report.category_scores = {
             item.category: item.score for item in result_data.category_scores
         }
