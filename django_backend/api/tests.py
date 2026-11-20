@@ -1,9 +1,13 @@
-# api/tests.py
+import io
 from unittest.mock import patch
 
+import docx
+import pypdf
 from django.contrib.auth import get_user_model
 from django.core.cache import cache
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.urls import reverse
+from pypdf.generic import DecodedStreamObject, DictionaryObject, NameObject
 from rest_framework import status
 from rest_framework.settings import api_settings
 from rest_framework.test import APIClient, APITestCase
@@ -87,9 +91,6 @@ class ResumeUploadThrottleTests(APITestCase):
             )
 
 
-from django.core.files.uploadedfile import SimpleUploadedFile
-
-
 class ResumeUploadServiceTests(APITestCase):
     def setUp(self):
         cache.clear()
@@ -110,7 +111,6 @@ class ResumeUploadServiceTests(APITestCase):
         ResumeUploadThrottle.rate = None
 
     def _sample_pdf(self):
-        # Minimal valid PDF header/body bytes for file/hash checks
         content = (
             b"%PDF-1.4\n1 0 obj\n<< /Type /Catalog >>\nendobj\n"
             b"trailer\n<< /Root 1 0 R >>\n%%EOF\n"
@@ -139,7 +139,7 @@ class ResumeUploadServiceTests(APITestCase):
     @patch.object(
         ResumeService,
         "extract_resume_text",
-        return_value="Experienced Python developer",
+        return_value="Experienced Python and Django engineer",
     )
     def test_valid_upload_deducts_credit_and_queues_task(
         self, _mock_extract, mock_task_delay
@@ -183,6 +183,76 @@ class ResumeResilienceTests(APITestCase):
 
     def _pdf_file(self, name="resume.pdf", payload=b"%PDF-1.4\n%%EOF\n"):
         return SimpleUploadedFile(name, payload, content_type="application/pdf")
+
+    def _build_real_pdf(
+        self, text: str = "Senior Python Engineer with Django experience"
+    ) -> SimpleUploadedFile:
+        writer = pypdf.PdfWriter()
+        writer.add_blank_page(width=612, height=792)
+
+        page = writer.pages[0]
+        stream_data = f"BT /F1 12 Tf 72 720 Td ({text}) Tj ET".encode("latin-1")
+        content_stream = DecodedStreamObject()
+        content_stream._data = stream_data
+
+        font_dict = DictionaryObject(
+            {
+                NameObject("/Type"): NameObject("/Font"),
+                NameObject("/Subtype"): NameObject("/Type1"),
+                NameObject("/BaseFont"): NameObject("/Helvetica"),
+            }
+        )
+        resources_dict = DictionaryObject(
+            {
+                NameObject("/Font"): DictionaryObject(
+                    {NameObject("/F1"): writer._add_object(font_dict)}
+                )
+            }
+        )
+
+        page[NameObject("/Contents")] = writer._add_object(content_stream)
+        page[NameObject("/Resources")] = writer._add_object(resources_dict)
+
+        buf = io.BytesIO()
+        writer.write(buf)
+        buf.seek(0)
+        return SimpleUploadedFile(
+            "real_resume.pdf", buf.read(), content_type="application/pdf"
+        )
+
+    def _build_real_docx(
+        self, paragraphs: list[str] | None = None
+    ) -> SimpleUploadedFile:
+        if paragraphs is None:
+            paragraphs = [
+                "Backend Developer",
+                "Built REST APIs with Django REST Framework, PostgreSQL, and Celery.",
+            ]
+        doc = docx.Document()
+        for p in paragraphs:
+            doc.add_paragraph(p)
+
+        buf = io.BytesIO()
+        doc.save(buf)
+        buf.seek(0)
+        return SimpleUploadedFile(
+            "real_resume.docx",
+            buf.read(),
+            content_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        )
+
+    def test_extract_resume_text_parses_real_docx(self):
+        docx_file = self._build_real_docx(
+            ["Backend Engineer", "Experienced in FastAPI, Django, and Redis."]
+        )
+        extracted = ResumeService.extract_resume_text(docx_file)
+        self.assertIn("Backend Engineer", extracted)
+        self.assertIn("FastAPI, Django, and Redis", extracted)
+
+    def test_extract_resume_text_parses_real_pdf(self):
+        pdf_file = self._build_real_pdf("Full Stack Developer with TypeScript")
+        extracted = ResumeService.extract_resume_text(pdf_file)
+        self.assertIn("Full Stack Developer", extracted)
 
     def test_rejects_fake_pdf_signature_without_deducting_credits(self):
         fake_pdf = SimpleUploadedFile(
@@ -323,3 +393,117 @@ class ResumeResilienceTests(APITestCase):
         scan.refresh_from_db()
         self.assertEqual(scan.status, ScanReport.Status.DONE)
         self.assertEqual(scan.overall_score, 92)
+
+    @patch("api.tasks.OpenAI")
+    def test_run_ai_review_task_marks_failed_and_refunds_credit_when_retries_exhausted(
+        self, mock_openai_cls
+    ):
+        mock_client = mock_openai_cls.return_value
+        mock_client.chat.completions.create.side_effect = RuntimeError(
+            "OpenRouter 503 Service Unavailable"
+        )
+
+        self.user.credits = 4
+        self.user.save(update_fields=["credits"])
+
+        resume = Resume.objects.create(
+            user=self.user,
+            file_name="resume.pdf",
+            file_hash="d" * 64,
+            parsed_text="Python developer with 3 years experience",
+        )
+        scan = ScanReport.objects.create(
+            resume=resume,
+            target_job_title="Backend Engineer",
+            target_job_desc="Django + PostgreSQL",
+            status=ScanReport.Status.PENDING,
+        )
+
+        with patch.object(run_ai_review_task, "max_retries", 0):
+            with self.assertRaises(RuntimeError):
+                run_ai_review_task.apply(args=[str(scan.id)]).get()
+
+        scan.refresh_from_db()
+        self.assertEqual(scan.status, ScanReport.Status.FAILED)
+
+        self.user.refresh_from_db()
+        self.assertEqual(self.user.credits, 5)
+
+        refund_count = CreditTransaction.objects.filter(
+            user=self.user, credits_added=1
+        ).count()
+        self.assertEqual(refund_count, 1)
+
+    @patch("api.tasks.OpenAI")
+    def test_run_ai_review_task_completes_scan_on_valid_schema_response(
+        self, mock_openai_cls
+    ):
+        valid_json = """
+        {
+          "overall_score": 88,
+          "category_scores": [
+            {"category": "backend_engineering", "score": 90},
+            {"category": "impact_metrics", "score": 84}
+          ],
+          "missing_keywords": ["Kubernetes", "Terraform"],
+          "section_critiques": [
+            {
+              "section": "Experience",
+              "target_item": "Software Engineer",
+              "critique": "Add more quantifiable latency or throughput improvements.",
+              "suggested_rewrite": "Reduced API p95 response time by 35% using query optimization and Redis caching."
+            }
+          ]
+        }
+        """
+        mock_choice = type(
+            "Choice",
+            (),
+            {
+                "message": type("Msg", (), {"content": valid_json})(),
+                "finish_reason": "stop",
+            },
+        )()
+        mock_usage = type(
+            "Usage",
+            (),
+            {
+                "prompt_tokens": 250,
+                "completion_tokens": 180,
+                "total_tokens": 430,
+            },
+        )()
+        mock_completion = type(
+            "Completion",
+            (),
+            {
+                "choices": [mock_choice],
+                "usage": mock_usage,
+            },
+        )()
+        mock_openai_cls.return_value.chat.completions.create.return_value = (
+            mock_completion
+        )
+
+        resume = Resume.objects.create(
+            user=self.user,
+            file_name="resume.docx",
+            file_hash="e" * 64,
+            parsed_text="Python and Django developer",
+        )
+        scan = ScanReport.objects.create(
+            resume=resume,
+            target_job_title="Backend Engineer",
+            target_job_desc="Build resilient APIs",
+            status=ScanReport.Status.PENDING,
+        )
+
+        result = run_ai_review_task.apply(args=[str(scan.id)])
+        self.assertTrue(result.successful())
+
+        scan.refresh_from_db()
+        self.assertEqual(scan.status, ScanReport.Status.DONE)
+        self.assertEqual(scan.overall_score, 88)
+        self.assertEqual(scan.category_scores["backend_engineering"], 90)
+        self.assertEqual(scan.missing_keywords, ["Kubernetes", "Terraform"])
+        self.assertEqual(len(scan.section_critiques), 1)
