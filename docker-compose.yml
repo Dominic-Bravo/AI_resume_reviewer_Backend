@@ -20,17 +20,22 @@ services:
   fastapi:
     build: ./fastapi_service
     container_name: resume_fastapi
+    env_file:
+      - ./.env
     ports:
       - "8001:8001"
     volumes:
       - ./fastapi_service:/app
     environment:
       - PYTHONUNBUFFERED=1
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
 
   django:
     build: ./django_backend
     container_name: resume_django
     command: python manage.py runserver 0.0.0.0:8000
+    env_file:
+      - ./.env
     volumes:
       - ./django_backend:/app
     ports:
@@ -43,6 +48,9 @@ services:
       - DB_PORT=5432
       - REDIS_URL=redis://redis:6379/0
       - FASTAPI_INTERNAL_URL=http://fastapi:8001
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+      - OPENROUTER_BASE_URL=${OPENROUTER_BASE_URL:-https://openrouter.ai/api/v1}
+      - OPENROUTER_MODEL=${OPENROUTER_MODEL:-google/gemini-2.5-flash}
     depends_on:
       - db
       - redis
@@ -52,6 +60,8 @@ services:
     build: ./django_backend
     container_name: resume_celery
     command: celery -A core worker --loglevel=info
+    env_file:
+      - ./.env
     volumes:
       - ./django_backend:/app
     environment:
@@ -62,6 +72,9 @@ services:
       - DB_PORT=5432
       - REDIS_URL=redis://redis:6379/0
       - FASTAPI_INTERNAL_URL=http://fastapi:8001
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+      - OPENROUTER_BASE_URL=${OPENROUTER_BASE_URL:-https://openrouter.ai/api/v1}
+      - OPENROUTER_MODEL=${OPENROUTER_MODEL:-google/gemini-2.5-flash}
     depends_on:
       - db
       - redis
