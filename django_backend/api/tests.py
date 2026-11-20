@@ -136,13 +136,21 @@ class ResumeUploadServiceTests(APITestCase):
         self.assertEqual(self.user_no_credits.credits, 0)
 
     @patch("api.tasks.run_ai_review_task.delay")
-    def test_valid_upload_deducts_credit_and_queues_task(self, mock_task_delay):
+    @patch.object(
+        ResumeService,
+        "extract_resume_text",
+        return_value="Experienced Python developer",
+    )
+    def test_valid_upload_deducts_credit_and_queues_task(
+        self, _mock_extract, mock_task_delay
+    ):
         self.client.force_authenticate(user=self.user_with_credits)
-        response = self.client.post(
-            self.upload_url,
-            {"file": self._sample_pdf()},
-            format="multipart",
-        )
+        with self.captureOnCommitCallbacks(execute=True):
+            response = self.client.post(
+                self.upload_url,
+                {"file": self._sample_pdf()},
+                format="multipart",
+            )
         self.assertIn(
             response.status_code,
             [status.HTTP_200_OK, status.HTTP_201_CREATED, status.HTTP_202_ACCEPTED],
@@ -182,7 +190,9 @@ class ResumeResilienceTests(APITestCase):
             b"this is plain text pretending to be a pdf",
             content_type="application/pdf",
         )
-        response = self.client.post(self.upload_url, {"file": fake_pdf}, format="multipart")
+        response = self.client.post(
+            self.upload_url, {"file": fake_pdf}, format="multipart"
+        )
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
 
         self.user.refresh_from_db()
@@ -195,14 +205,18 @@ class ResumeResilienceTests(APITestCase):
             b"%PDF-1.4\n" + (b"x" * (MAX_RESUME_FILE_SIZE_BYTES + 1024)),
             content_type="application/pdf",
         )
-        response = self.client.post(self.upload_url, {"file": oversized}, format="multipart")
+        response = self.client.post(
+            self.upload_url, {"file": oversized}, format="multipart"
+        )
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
 
         self.user.refresh_from_db()
         self.assertEqual(self.user.credits, 5)
 
     @patch("api.tasks.run_ai_review_task.delay")
-    @patch.object(ResumeService, "extract_resume_text", return_value="Python Django engineer")
+    @patch.object(
+        ResumeService, "extract_resume_text", return_value="Python Django engineer"
+    )
     def test_duplicate_inflight_scan_reuses_report_and_does_not_double_charge(
         self, _mock_extract, mock_delay
     ):
@@ -212,21 +226,22 @@ class ResumeResilienceTests(APITestCase):
             "target_job_desc": "Build APIs",
         }
 
-        first_resp = self.client.post(self.upload_url, payload, format="multipart")
+        with self.captureOnCommitCallbacks(execute=True):
+            first_resp = self.client.post(self.upload_url, payload, format="multipart")
         self.assertEqual(first_resp.status_code, status.HTTP_201_CREATED)
         first_scan_id = first_resp.data["scan_id"]
 
-        # Second identical upload while scan is still PENDING
         second_file = self._pdf_file()
-        second_resp = self.client.post(
-            self.upload_url,
-            {
-                "file": second_file,
-                "target_job_title": "  Backend Engineer  ",
-                "target_job_desc": "  Build APIs  ",
-            },
-            format="multipart",
-        )
+        with self.captureOnCommitCallbacks(execute=True):
+            second_resp = self.client.post(
+                self.upload_url,
+                {
+                    "file": second_file,
+                    "target_job_title": "  Backend Engineer  ",
+                    "target_job_desc": "  Build APIs  ",
+                },
+                format="multipart",
+            )
         self.assertEqual(second_resp.status_code, status.HTTP_201_CREATED)
         self.assertEqual(second_resp.data["scan_id"], first_scan_id)
 
@@ -282,7 +297,7 @@ class ResumeResilienceTests(APITestCase):
         other_client = APIClient()
         other_client.force_authenticate(user=self.other_user)
 
-        detail_url = reverse("users:scan-result-detail", kwargs={"scan_id": scan.id})
+        detail_url = reverse("users:scan-detail", kwargs={"scan_id": scan.id})
         resp = other_client.get(detail_url)
         self.assertEqual(resp.status_code, status.HTTP_404_NOT_FOUND)
 
