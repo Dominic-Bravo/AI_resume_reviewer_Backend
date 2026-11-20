@@ -16,3 +16,4 @@ openai
 pypdf
 python-docx
 django-unfold
+whitenoise
