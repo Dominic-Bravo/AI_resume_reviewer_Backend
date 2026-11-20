@@ -3,6 +3,7 @@ from allauth.socialaccount.providers.google.views import GoogleOAuth2Adapter
 from allauth.socialaccount.providers.oauth2.client import OAuth2Client
 from dj_rest_auth.registration.views import SocialLoginView
 from django.conf import settings
+from django.contrib.auth import get_user_model
 from django.middleware.csrf import get_token
 from drf_spectacular.utils import OpenApiResponse, extend_schema
 from rest_framework import generics, permissions, serializers, status
@@ -27,6 +28,7 @@ from api.serializers import (
 from api.services import ResumeService
 from api.throttles import ResumeUploadThrottle
 
+User = get_user_model()
 
 class BaseCustomSocialLoginView(SocialLoginView):
     permission_classes = (permissions.AllowAny,)
@@ -37,9 +39,14 @@ class BaseCustomSocialLoginView(SocialLoginView):
         Returns access token in JSON and attaches refresh token in HttpOnly cookie.
         """
         original_response = super().get_response()
+        payload = (
+            original_response.data
+            if isinstance(original_response.data, dict)
+            else {}
+        )
 
-        access_token = original_response.data.get("access")
-        refresh_token = original_response.data.get("refresh")
+        access_token = payload.get("access")
+        refresh_token = payload.get("refresh")
         user_data = UserMeSerializer(self.user).data
 
         custom_response = Response(
@@ -50,7 +57,7 @@ class BaseCustomSocialLoginView(SocialLoginView):
             status=status.HTTP_200_OK,
         )
 
-        if refresh_token:
+        if isinstance(refresh_token, str) and refresh_token:
             set_refresh_cookie(custom_response, refresh_token)
 
         return custom_response
@@ -97,8 +104,12 @@ class RegisterAPIView(APIView):
         serializer = RegisterSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
-        user = serializer.save()
-        refresh = RefreshToken.for_user(user)
+        saved_user = serializer.save()
+        if isinstance(saved_user, list) or saved_user is None:
+            raise ValueError("Expected a single user instance from RegisterSerializer.save().")
+
+        refresh = RefreshToken.for_user(saved_user)
+        user = saved_user
 
         response = Response(
             {
@@ -129,7 +140,15 @@ class LoginAPIView(APIView):
         serializer = LoginSerializer(data=request.data, context={"request": request})
         serializer.is_valid(raise_exception=True)
 
-        user = serializer.validated_data["user"]
+        validated = (
+            serializer.validated_data
+            if isinstance(serializer.validated_data, dict)
+            else {}
+        )
+        user = validated.get("user")
+        if user is None:
+            raise ValidationError("Unable to authenticate with provided credentials.")
+
         refresh = RefreshToken.for_user(user)
 
         response = Response(
