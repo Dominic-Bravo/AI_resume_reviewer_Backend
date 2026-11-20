@@ -2,6 +2,7 @@ import uuid
 
 from django.contrib.auth.models import AbstractUser, BaseUserManager
 from django.db import models
+from django.db.models import Q
 
 
 class UserManager(BaseUserManager):
@@ -50,6 +51,20 @@ class Resume(models.Model):
 
 
 class ScanReport(models.Model):
+
+    class Meta:
+        constraints = (
+            models.UniqueConstraint(
+                fields=["resume", "target_job_title", "target_job_desc"],
+                condition=Q(status__in=["PENDING", "PROCESSING"]),
+                name="unique_active_scan_per_resume_and_target",
+            ),
+        )
+        indexes = (
+            models.Index(fields=["resume", "status"], name="idx_scan_resume_status"),
+            models.Index(fields=["resume", "-created_at"], name="idx_scan_resume_created"),
+        )
+
     class Status(models.TextChoices):
         PENDING = "PENDING", "Pending"
         PROCESSING = "PROCESSING", "Processing"

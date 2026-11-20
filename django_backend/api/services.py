@@ -1,17 +1,51 @@
 # api/services.py
-# api/services.py
 import hashlib
 
 import docx
 import pypdf
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.db.models import F
 from rest_framework.exceptions import APIException, ValidationError
 
 from .models import CreditTransaction, Resume, ScanReport
 
+MAX_RESUME_FILE_SIZE_BYTES = 5 * 1024 * 1024  # 5 MB
+MAX_RESUME_TEXT_CHARS = 30_000
+MAX_JOB_TITLE_CHARS = 255
+MAX_JOB_DESC_CHARS = 10_000
+
+PDF_MAGIC_BYTES = b"%PDF-"
+DOCX_MAGIC_BYTES = b"PK\x03\x04"
+
 
 class ResumeService:
+    @staticmethod
+    def validate_uploaded_file(uploaded_file) -> None:
+        if uploaded_file is None:
+            raise ValidationError("No resume file provided.")
+
+        file_size = getattr(uploaded_file, "size", None)
+        if file_size is not None and file_size > MAX_RESUME_FILE_SIZE_BYTES:
+            raise ValidationError("Resume file exceeds the 5 MB maximum size limit.")
+
+        filename = (getattr(uploaded_file, "name", "") or "").lower()
+        header = uploaded_file.read(8)
+        uploaded_file.seek(0)
+
+        if not header:
+            raise ValidationError("The uploaded file is empty.")
+
+        if filename.endswith(".pdf"):
+            if not header.startswith(PDF_MAGIC_BYTES):
+                raise ValidationError("Invalid PDF file signature.")
+        elif filename.endswith(".docx"):
+            if not header.startswith(DOCX_MAGIC_BYTES):
+                raise ValidationError("Invalid DOCX file signature.")
+        else:
+            raise ValidationError(
+                "Unsupported file format. Please upload a PDF or DOCX file."
+            )
+
     @staticmethod
     def compute_file_hash(uploaded_file) -> str:
         file_bytes = uploaded_file.read()
@@ -21,6 +55,7 @@ class ResumeService:
 
     @staticmethod
     def extract_resume_text(uploaded_file) -> str:
+        ResumeService.validate_uploaded_file(uploaded_file)
         filename = uploaded_file.name.lower()
         extracted_text = ""
 
@@ -41,12 +76,17 @@ class ResumeService:
                     "Unsupported file format. Please upload a PDF or DOCX file."
                 )
 
+        except ValidationError:
+            raise
         except Exception as e:
             raise ValidationError(f"Failed to parse document text: {str(e)}")
 
         extracted_text = extracted_text.strip()
         if not extracted_text:
             raise ValidationError("The uploaded document appears to be empty.")
+
+        if len(extracted_text) > MAX_RESUME_TEXT_CHARS:
+            extracted_text = extracted_text[:MAX_RESUME_TEXT_CHARS]
 
         return extracted_text
 
@@ -59,8 +99,9 @@ class ResumeService:
         Handles both new resumes and re-scans of existing resume files against new/updated job targets.
         Atomically deducts credits, creates a fresh ScanReport, and enqueues the AI review after commit.
         """
-        normalized_title = (job_title or "").strip()
-        normalized_desc = (job_desc or "").strip()
+        normalized_title = (job_title or "").strip()[:MAX_JOB_TITLE_CHARS]
+        normalized_desc = (job_desc or "").strip()[:MAX_JOB_DESC_CHARS]
+        bounded_text = (extracted_text or "").strip()[:MAX_RESUME_TEXT_CHARS]
 
         existing_resume = Resume.objects.filter(user=user, file_hash=file_hash).first()
         if existing_resume:
@@ -69,10 +110,7 @@ class ResumeService:
                     resume=existing_resume,
                     target_job_title=normalized_title,
                     target_job_desc=normalized_desc,
-                    status__in=[
-                        ScanReport.Status.PENDING,
-                        ScanReport.Status.PROCESSING,
-                    ],
+                    status__in=[ScanReport.Status.PENDING, ScanReport.Status.PROCESSING],
                 )
                 .order_by("-id")
                 .first()
@@ -99,23 +137,40 @@ class ResumeService:
             file_hash=file_hash,
             defaults={
                 "file_name": uploaded_file.name,
-                "parsed_text": extracted_text,
+                "parsed_text": bounded_text,
             },
         )
 
         # If the resume already existed, keep filename and parsed_text current
         if not created:
             resume.file_name = uploaded_file.name
-            resume.parsed_text = extracted_text
+            resume.parsed_text = bounded_text
             resume.save(update_fields=["file_name", "parsed_text"])
 
         # ALWAYS create a brand new ScanReport so re-scans trigger fresh AI runs
-        scan_report = ScanReport.objects.create(
-            resume=resume,
-            target_job_title=job_title,
-            target_job_desc=job_desc,
-            status=ScanReport.Status.PENDING,
-        )
+        try:
+            scan_report = ScanReport.objects.create(
+                resume=resume,
+                target_job_title=normalized_title,
+                target_job_desc=normalized_desc,
+                status=ScanReport.Status.PENDING,
+            )
+        except IntegrityError:
+            # Only catches simultaneous races if the DB partial UniqueConstraint on ScanReport is added
+            transaction.set_rollback(True)
+            inflight_scan = (
+                ScanReport.objects.filter(
+                    resume=resume,
+                    target_job_title=normalized_title,
+                    target_job_desc=normalized_desc,
+                    status__in=[ScanReport.Status.PENDING, ScanReport.Status.PROCESSING],
+                )
+                .order_by("-id")
+                .first()
+            )
+            if inflight_scan:
+                return resume, inflight_scan
+            raise
 
         CreditTransaction.objects.create(
             user=user,
@@ -123,7 +178,7 @@ class ResumeService:
             amount_cents=0,
             description=(
                 f"Resume scan deduction for {uploaded_file.name} "
-                f"({job_title or 'General Role'}) [scan={scan_report.id}]"
+                f"({normalized_title or 'General Role'}) [scan={scan_report.id}]"
             ),
         )
 
@@ -152,7 +207,7 @@ class ResumeService:
                 .filter(pk=scan_report_id)
                 .first()
             )
-            if not scan_report or not scan_report.resume_id:
+            if not scan_report or scan_report.resume is None:
                 return False
 
             user = scan_report.resume.user

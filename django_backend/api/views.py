@@ -4,6 +4,7 @@ from allauth.socialaccount.providers.oauth2.client import OAuth2Client
 from dj_rest_auth.registration.views import SocialLoginView
 from django.conf import settings
 from django.contrib.auth import get_user_model
+from django.db.models import Prefetch
 from django.middleware.csrf import get_token
 from drf_spectacular.utils import OpenApiResponse, extend_schema
 from rest_framework import generics, permissions, serializers, status
@@ -118,7 +119,7 @@ class RegisterAPIView(APIView):
                 "message": "User registered successfully.",
             },
             status=status.HTTP_201_CREATED,
-        )
+        )   
 
         # Store refresh token in HttpOnly cookie.
         set_refresh_cookie(response, str(refresh))
@@ -379,9 +380,12 @@ class ScanResultDetailView(APIView):
         tags=["Resume Pipeline"],
     )
     def get(self, request, scan_id):
-        try:
-            scan_report = ScanReport.objects.select_related("resume").get(id=scan_id)
-        except ScanReport.DoesNotExist:
+        scan_report = (
+            ScanReport.objects.select_related("resume", "resume__user")
+            .filter(id=scan_id, resume__user=request.user)
+            .first()
+        )
+        if not scan_report:
             return Response(
                 {"error": "Scan report not found."},
                 status=status.HTTP_404_NOT_FOUND,
@@ -401,12 +405,12 @@ class UserScanHistoryView(generics.ListAPIView):
     permission_classes = (permissions.IsAuthenticated,)
 
     def get_queryset(self):
+        scans_queryset = ScanReport.objects.order_by("-created_at")
         return (
             Resume.objects.filter(user=self.request.user)
-            .prefetch_related("scans")
+            .prefetch_related(Prefetch("scans", queryset=scans_queryset))
             .order_by("-created_at")
         )
-
 
 class UserCreditBalanceView(APIView):
     permission_classes = (permissions.IsAuthenticated,)
