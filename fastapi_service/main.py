@@ -1,3 +1,4 @@
+import asyncio
 import io
 
 import pdfplumber
@@ -8,10 +9,33 @@ from pydantic import BaseModel
 app = FastAPI()
 
 
+@app.get("/health")
+def health_check():
+    return {"status": "ok"}
+
+
 class ParseResponse(BaseModel):
     file_name: str
     parsed_text: str
     word_count: int
+
+
+def _extract_pdf_text(data: bytes) -> str:
+    with pdfplumber.open(io.BytesIO(data)) as pdf:
+        return "\n".join(
+            page_text
+            for page in pdf.pages
+            if (page_text := page.extract_text())
+        )
+
+
+def _extract_docx_text(data: bytes) -> str:
+    document = Document(io.BytesIO(data))
+    return "\n".join(
+        paragraph.text
+        for paragraph in document.paragraphs
+        if paragraph.text.strip()
+    )
 
 
 @app.post("/api/v1/parse", response_model=ParseResponse)
@@ -37,20 +61,9 @@ async def parse_resume_file(
 
     try:
         if filename.endswith(".pdf"):
-            with pdfplumber.open(io.BytesIO(contents)) as pdf:
-                extracted_text = "\n".join(
-                    page_text
-                    for page in pdf.pages
-                    if (page_text := page.extract_text())
-                )
-
+            extracted_text = await asyncio.to_thread(_extract_pdf_text, contents)
         elif filename.endswith(".docx"):
-            document = Document(io.BytesIO(contents))
-            extracted_text = "\n".join(
-                paragraph.text
-                for paragraph in document.paragraphs
-                if paragraph.text.strip()
-            )
+            extracted_text = await asyncio.to_thread(_extract_docx_text, contents)
 
     except (ValueError, OSError, Exception) as e:
         raise HTTPException(

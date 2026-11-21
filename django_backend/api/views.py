@@ -1,3 +1,5 @@
+import os
+
 import redis
 from allauth.socialaccount.providers.google.views import GoogleOAuth2Adapter
 from allauth.socialaccount.providers.oauth2.client import OAuth2Client
@@ -285,10 +287,10 @@ class ProtectedTestView(APIView):
         )
 
 
-# Redis client for concurrency locking
-redis_client = redis.Redis.from_url(
-    getattr(settings, "REDIS_URL", "redis://redis:6379/0")
-)
+raw_redis_url = (os.getenv("REDIS_URL") or "redis://localhost:6379/0").strip()
+if not raw_redis_url.startswith(("redis://", "rediss://", "unix://")):
+    raw_redis_url = "redis://localhost:6379/0"
+redis_client = redis.Redis.from_url(raw_redis_url)
 
 
 class UploadResumeView(APIView):
