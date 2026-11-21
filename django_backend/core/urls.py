@@ -15,6 +15,7 @@ Including another URLconf
     2. Add a URL to urlpatterns:  path('blog/', include('blog.urls'))
 """
 
+from api.views import health_check
 from django.contrib import admin
 from django.urls import include, path
 from drf_spectacular.views import (
@@ -28,6 +29,7 @@ api_patterns = [
 ]
 
 urlpatterns = [
+    path("api/health/", health_check, name="health_check"),
     path("admin/", admin.site.urls),
     path("", include(api_patterns)),
     # OpenAPI 3 Schema & Swagger UI
