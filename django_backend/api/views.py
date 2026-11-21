@@ -7,7 +7,10 @@ from dj_rest_auth.registration.views import SocialLoginView
 from django.conf import settings
 from django.contrib.auth import get_user_model
 from django.db.models import Prefetch
+from django.http import JsonResponse
 from django.middleware.csrf import get_token
+from django.views.decorators.csrf import csrf_exempt
+from django.views.decorators.http import require_http_methods
 from drf_spectacular.utils import OpenApiResponse, extend_schema
 from rest_framework import generics, permissions, serializers, status
 from rest_framework.exceptions import APIException, ValidationError
@@ -32,6 +35,11 @@ from api.services import ResumeService
 from api.throttles import ResumeUploadThrottle
 
 User = get_user_model()
+
+@csrf_exempt
+@require_http_methods(["GET", "HEAD"])
+def health_check(request):
+    return JsonResponse({"status": "ok"}, status=200)
 
 class BaseCustomSocialLoginView(SocialLoginView):
     permission_classes = (permissions.AllowAny,)
