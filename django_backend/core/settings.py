@@ -269,10 +269,12 @@ CELERY_TASK_ALWAYS_EAGER = (
 )
 CELERY_TASK_EAGER_PROPAGATES = True
 
+_cache_location = ((os.getenv("CACHE_REDIS_URL") or "").strip() or f"{REDIS_URL}/1").strip()
+
 CACHES = {
     "default": {
         "BACKEND": "django.core.cache.backends.redis.RedisCache",
-        "LOCATION": (os.getenv("CACHE_REDIS_URL") or "").strip() or f"{REDIS_URL}/1",
+        "LOCATION": _cache_location,
     }
 }
 
