@@ -1,0 +1,55 @@
+name: Backend Unit Tests
+
+on:
+  push:
+    branches: ["main", "master", "develop"]
+    paths:
+      - "django_backend/**"
+      - ".github/workflows/backend-tests.yml"
+  pull_request:
+    branches: ["main", "master", "develop"]
+    paths:
+      - "django_backend/**"
+      - ".github/workflows/backend-tests.yml"
+
+# Cancel outdated runs if you push multiple commits rapidly
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pytest:
+    name: Run pytest (uv)
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: django_backend
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: "django_backend/uv.lock"
+
+      - name: Set up Python (from pyproject.toml)
+        run: uv python install
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Run unit test suite
+        env:
+          # Safe dummy values so Django settings load cleanly in CI without a .env file
+          SECRET_KEY: "ci-dummy-secret-key-not-used-in-production"
+          DEBUG: "True"
+          ALLOWED_HOSTS: "localhost,127.0.0.1,testserver"
+          DATABASE_URL: "sqlite:///db.sqlite3"
+          REDIS_URL: "redis://localhost:6379/0"
+          FRONTEND_URL: "http://localhost:3000"
+          OPENROUTER_API_KEY: "dummy-ci-key"
+        run: uv run pytest -v --tb=short
