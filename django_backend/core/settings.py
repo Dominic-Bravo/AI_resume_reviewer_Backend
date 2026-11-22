@@ -11,26 +11,34 @@ https://docs.djangoproject.com/en/6.1/ref/settings/
 """
 
 import os
+from datetime import timedelta
 from pathlib import Path
 
 from dotenv import load_dotenv
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-
 load_dotenv(BASE_DIR / ".env")
-
 
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/6.1/howto/deployment/checklist/
 
-# SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = "django-insecure-8zsh8s$br0jn3ai+=w0cf4t*)_&$92156$a#wr1ek!$ho1d@ty"
-
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+DEBUG = os.getenv("DEBUG", "False") == "True"
 
-ALLOWED_HOSTS = []
+# SECURITY WARNING: keep the secret key used in production secret!
+SECRET_KEY = os.getenv(
+    "SECRET_KEY",
+    "django-insecure-dev-only-change-in-prod" if DEBUG else "",
+)
+if not SECRET_KEY:
+    raise RuntimeError(
+        "SECRET_KEY environment variable must be set when DEBUG is False."
+    )
+
+ALLOWED_HOSTS = [
+    h.strip() for h in os.getenv("ALLOWED_HOSTS", "").split(",") if h.strip()
+]
 
 AUTH_USER_MODEL = "api.User"
 
@@ -42,6 +50,7 @@ AUTHENTICATION_BACKENDS = [
 # Application definition
 
 INSTALLED_APPS = [
+    "unfold",
     "django.contrib.admin",
     "django.contrib.auth",
     "django.contrib.contenttypes",
@@ -54,12 +63,11 @@ INSTALLED_APPS = [
     "allauth.account",
     "allauth.socialaccount",
     "allauth.socialaccount.providers.google",
-    "allauth.socialaccount.providers.facebook",
     "dj_rest_auth",
     "dj_rest_auth.registration",
     "drf_spectacular",
     "corsheaders",
-    # security
+    # Security & API
     "rest_framework_simplejwt",
     "rest_framework_simplejwt.token_blacklist",
     "rest_framework.authtoken",
@@ -67,18 +75,50 @@ INSTALLED_APPS = [
     "api",
 ]
 
+UNFOLD = {
+    "SITE_TITLE": "RoleMatch Admin",
+    "SITE_HEADER": "RoleMatch",
+    "SITE_SUBHEADER": "AI Resume & Role Alignment",
+    "COLORS": {
+        "base": {
+            "50": "250, 250, 250",
+            "100": "244, 244, 245",
+            "200": "228, 228, 231",
+            "300": "212, 212, 216",
+            "400": "161, 161, 170",
+            "500": "113, 113, 122",
+            "600": "82, 82, 91",
+            "700": "63, 63, 70",
+            "800": "39, 39, 42",
+            "900": "24, 24, 27",
+            "950": "9, 9, 11",
+        },
+        "primary": {
+            "50": "250, 250, 250",
+            "100": "244, 244, 245",
+            "200": "228, 228, 231",
+            "300": "212, 212, 216",
+            "400": "161, 161, 170",
+            "500": "38, 38, 38",
+            "600": "28, 28, 28",
+            "700": "23, 23, 23",
+            "800": "20, 20, 20",
+            "900": "15, 15, 15",
+            "950": "10, 10, 10",
+        },
+    },
+}
 
 SITE_ID = 1
 
 # Tell allauth/dj-rest-auth to use your custom User model
 SOCIALACCOUNT_ADAPTER = "api.adapters.CustomSocialAccountAdapter"
 
-AUTHENTICATION_BACKENDS = [
-    "django.contrib.auth.backends.ModelBackend",
-    "allauth.account.auth_backends.AuthenticationBackend",
-]
+COOKIE_SECURE = not DEBUG
+COOKIE_SAMESITE = os.getenv("COOKIE_SAMESITE", "None" if COOKIE_SECURE else "Lax")
 
-from datetime import timedelta
+if COOKIE_SECURE:
+    SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
 
 # --- SimpleJWT Settings ---
 SIMPLE_JWT = {
@@ -89,11 +129,10 @@ SIMPLE_JWT = {
     "AUTH_HEADER_TYPES": ("Bearer",),
     # Cookie Specifics
     "AUTH_COOKIE": "refresh_token",
-    "AUTH_COOKIE_PATH": "/",  # Scope cookie strictly to refresh endpoint
+    "AUTH_COOKIE_PATH": "/",
     "AUTH_COOKIE_HTTP_ONLY": True,  # Prevents JS/XSS access
-    "AUTH_COOKIE_SECURE": os.getenv("DEBUG", "True")
-    != "True",  # True in Production (HTTPS)
-    "AUTH_COOKIE_SAMESITE": "Lax",  # Prevents CSRF while preserving navigation
+    "AUTH_COOKIE_SECURE": COOKIE_SECURE,  # True in Production (HTTPS)
+    "AUTH_COOKIE_SAMESITE": COOKIE_SAMESITE,
 }
 
 # --- REST Framework & SimpleJWT Configuration ---
@@ -126,8 +165,6 @@ REST_AUTH = {
 # --- Allauth Account & OAuth Settings ---
 ACCOUNT_USER_MODEL_USERNAME_FIELD = None
 ACCOUNT_LOGIN_METHODS = {"email"}
-# ACCOUNT_EMAIL_REQUIRED = True
-# ACCOUNT_USERNAME_REQUIRED = False
 ACCOUNT_SIGNUP_FIELDS = ["email*", "password1*", "password2*"]
 ACCOUNT_EMAIL_VERIFICATION = "none"  # Set to "optional" or "mandatory" in production
 
@@ -152,17 +189,14 @@ SOCIALACCOUNT_PROVIDERS = {
         ],
         "AUTH_PARAMS": {"access_type": "online"},
     },
-    "facebook": {
-        "APPS": [
-            {
-                "client_id": os.getenv("FACEBOOK_APP_ID", ""),
-                "secret": os.getenv("FACEBOOK_APP_SECRET", ""),
-                "key": "",
-            }
-        ],
-        "METHOD": "oauth2",
-        "SCOPE": ["email", "public_profile"],
-        "FIELDS": ["id", "first_name", "last_name", "name", "picture"],
+}
+
+STORAGES = {
+    "default": {
+        "BACKEND": "django.core.files.storage.FileSystemStorage",
+    },
+    "staticfiles": {
+        "BACKEND": "whitenoise.storage.CompressedStaticFilesStorage",
     },
 }
 
@@ -178,15 +212,28 @@ MIDDLEWARE = [
     "django.contrib.messages.middleware.MessageMiddleware",
     "django.middleware.clickjacking.XFrameOptionsMiddleware",
     "allauth.account.middleware.AccountMiddleware",
-    "django.middleware.common.CommonMiddleware",
+    "whitenoise.middleware.WhiteNoiseMiddleware",
 ]
 
-# CORS configuration
+# CORS & CSRF configuration
 CORS_ALLOWED_ORIGINS = [
-    "http://localhost:3000",
+    o.strip()
+    for o in os.getenv("CORS_ALLOWED_ORIGINS", "http://localhost:3000").split(",")
+    if o.strip()
 ]
-
 CORS_ALLOW_CREDENTIALS = True
+
+CSRF_TRUSTED_ORIGINS = [
+    o.strip()
+    for o in os.getenv("CSRF_TRUSTED_ORIGINS", "http://localhost:3000").split(",")
+    if o.strip()
+]
+CSRF_COOKIE_HTTP_ONLY = (
+    False  # Set to False so frontend JavaScript can read the CSRF token from cookie
+)
+CSRF_COOKIE_SAMESITE = COOKIE_SAMESITE
+CSRF_COOKIE_SECURE = COOKIE_SECURE
+SESSION_COOKIE_SECURE = COOKIE_SECURE
 
 ROOT_URLCONF = "core.urls"
 
@@ -207,39 +254,64 @@ TEMPLATES = [
 
 WSGI_APPLICATION = "core.wsgi.application"
 
-# allauth
-
-CSRF_COOKIE_HTTP_ONLY = (
-    False  # Set to False so frontend JavaScript can read the CSRF token from cookie
+# Celery & Redis Cache
+_raw_redis = (os.getenv("REDIS_URL") or "").strip()
+REDIS_URL = (
+    _raw_redis
+    if _raw_redis.startswith(("redis://", "rediss://", "unix://"))
+    else "redis://localhost:6379"
 )
-CSRF_COOKIE_SAMESITE = "Lax"
-CSRF_COOKIE_SECURE = os.getenv("DEBUG", "True") != "True"
 
+CELERY_BROKER_URL = (os.getenv("CELERY_BROKER_URL") or "").strip() or f"{REDIS_URL}/0"
+CELERY_RESULT_BACKEND = (os.getenv("CELERY_RESULT_BACKEND") or "").strip() or f"{REDIS_URL}/0"
+CELERY_TASK_ALWAYS_EAGER = (
+    os.getenv("CELERY_TASK_ALWAYS_EAGER", "False").lower() == "true"
+)
+CELERY_TASK_EAGER_PROPAGATES = True
 
-CELERY_BROKER_URL = "redis://redis:6379/0"
-CELERY_RESULT_BACKEND = "redis://redis:6379/0"
+_cache_location = ((os.getenv("CACHE_REDIS_URL") or "").strip() or f"{REDIS_URL}/1").strip()
 
-# core/settings.py
 CACHES = {
     "default": {
         "BACKEND": "django.core.cache.backends.redis.RedisCache",
-        "LOCATION": "redis://redis:6379/1",  # Use DB /1 so cache stays separate from Celery's /0
-    }
-}
-# Database
-# https://docs.djangoproject.com/en/6.1/ref/settings/#databases
-
-DATABASES = {
-    "default": {
-        "ENGINE": "django.db.backends.postgresql",
-        "NAME": os.environ.get("POSTGRES_DB", "resume_db"),
-        "USER": os.environ.get("POSTGRES_USER", "postgres"),
-        "PASSWORD": os.environ.get("POSTGRES_PASSWORD", "postgrespassword"),
-        "HOST": "db",  # Must match your service name in docker-compose.yml
-        "PORT": "5432",
+        "LOCATION": _cache_location,
     }
 }
 
+from urllib.parse import unquote, urlparse
+
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
+
+if DATABASE_URL:
+    parsed = urlparse(DATABASE_URL)
+    db_options = (
+        {"sslmode": "require"}
+        if (not DEBUG and "sslmode=" not in DATABASE_URL)
+        else {}
+    )
+    DATABASES = {
+        "default": {
+            "ENGINE": "django.db.backends.postgresql",
+            "NAME": (parsed.path or "").lstrip("/"),
+            "USER": unquote(parsed.username or ""),
+            "PASSWORD": unquote(parsed.password or ""),
+            "HOST": parsed.hostname or "",
+            "PORT": str(parsed.port or 5432),
+            "CONN_MAX_AGE": 60,
+            "OPTIONS": db_options,
+        }
+    }
+else:
+    DATABASES = {
+        "default": {
+            "ENGINE": "django.db.backends.postgresql",
+            "NAME": os.environ.get("POSTGRES_DB", "resume_db"),
+            "USER": os.environ.get("POSTGRES_USER", "postgres"),
+            "PASSWORD": os.environ.get("POSTGRES_PASSWORD", "postgrespassword"),
+            "HOST": os.environ.get("POSTGRES_HOST", "db"),
+            "PORT": os.environ.get("POSTGRES_PORT", "5432"),
+        }
+    }
 
 # Password validation
 # https://docs.djangoproject.com/en/6.1/ref/settings/#auth-password-validators
@@ -260,6 +332,8 @@ AUTH_PASSWORD_VALIDATORS = [
 ]
 
 
+
+
 # Internationalization
 # https://docs.djangoproject.com/en/6.1/topics/i18n/
 
@@ -271,12 +345,11 @@ USE_I18N = True
 
 USE_TZ = True
 
-
 # Static files (CSS, JavaScript, Images)
 # https://docs.djangoproject.com/en/6.1/howto/static-files/
 
 STATIC_URL = "static/"
-
+STATIC_ROOT = BASE_DIR / "staticfiles"
 
 # Email
 # https://docs.djangoproject.com/en/6.1/topics/email/#topic-email-configuration
@@ -284,5 +357,42 @@ STATIC_URL = "static/"
 MAILERS = {
     "default": {
         "BACKEND": "django.core.mail.backends.console.EmailBackend",
+    },
+}
+
+
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "handlers": {
+        "console": {
+            "class": "logging.StreamHandler",
+        },
+    },
+    "root": {
+        "handlers": ["console"],
+        "level": "INFO",
+    },
+    "loggers": {
+        "django": {
+            "handlers": ["console"],
+            "level": "INFO",
+            "propagate": False,
+        },
+        "django.request": {
+            "handlers": ["console"],
+            "level": "ERROR",
+            "propagate": False,
+        },
+        "allauth": {
+            "handlers": ["console"],
+            "level": "INFO",
+            "propagate": False,
+        },
+        "dj_rest_auth": {
+            "handlers": ["console"],
+            "level": "INFO",
+            "propagate": False,
+        },
     },
 }

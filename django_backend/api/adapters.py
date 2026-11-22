@@ -1,8 +1,8 @@
-# api/adapters.py
 import random
 
 from allauth.socialaccount.adapter import DefaultSocialAccountAdapter
 from django.contrib.auth import get_user_model
+from django.contrib.auth.models import AbstractUser
 
 User = get_user_model()
 
@@ -14,6 +14,7 @@ class CustomSocialAccountAdapter(DefaultSocialAccountAdapter):
         from the Google OAuth payload.
         """
         user = super().populate_user(request, sociallogin, data)
+        assert isinstance(user, AbstractUser)
         extra_data = sociallogin.account.extra_data
 
         # Extract first name and last name with sensible fallbacks

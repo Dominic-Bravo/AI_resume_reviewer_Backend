@@ -1,7 +1,9 @@
 import uuid
+from typing import ClassVar
 
 from django.contrib.auth.models import AbstractUser, BaseUserManager
 from django.db import models
+from django.db.models import Q
 
 
 class UserManager(BaseUserManager):
@@ -9,7 +11,7 @@ class UserManager(BaseUserManager):
         if not email:
             raise ValueError("The Email field must be set")
         email = self.normalize_email(email)
-        user = self.model(email=email, **extra_fields)
+        user = self.model(email=email, **extra_fields)  
         user.set_password(password)
         user.save(using=self._db)
         return user
@@ -28,10 +30,10 @@ class User(AbstractUser):
     credits = models.IntegerField(default=1)
     created_at = models.DateTimeField(auto_now_add=True)
 
-    objects = UserManager()
+    objects = UserManager() # type: ignore[assignment]
 
     USERNAME_FIELD = "email"
-    REQUIRED_FIELDS = ()  # No extra fields required when running createsuperuser
+    REQUIRED_FIELDS: ClassVar[list[str]] = [] # No extra fields required when running createsuperuser
 
     def __str__(self):
         return self.email
@@ -50,6 +52,20 @@ class Resume(models.Model):
 
 
 class ScanReport(models.Model):
+
+    class Meta:
+        constraints = (
+            models.UniqueConstraint(
+                fields=["resume", "target_job_title", "target_job_desc"],
+                condition=Q(status__in=["PENDING", "PROCESSING"]),
+                name="unique_active_scan_per_resume_and_target",
+            ),
+        )
+        indexes = (
+            models.Index(fields=["resume", "status"], name="idx_scan_resume_status"),
+            models.Index(fields=["resume", "-created_at"], name="idx_scan_resume_created"),
+        )
+
     class Status(models.TextChoices):
         PENDING = "PENDING", "Pending"
         PROCESSING = "PROCESSING", "Processing"

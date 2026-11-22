@@ -11,6 +11,7 @@ from api.views import (
     UploadResumeView,
     UserCreditBalanceView,
     UserScanHistoryView,
+    health_check,
 )
 
 router = DefaultRouter()
@@ -31,5 +32,6 @@ urlpatterns = [
         ScanResultDetailView.as_view(),
         name="scan-detail",
     ),
+    path("api/health/", health_check, name="health_check"),
     path("", include(router.urls)),
 ]

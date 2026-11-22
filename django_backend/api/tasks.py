@@ -3,7 +3,7 @@ import logging
 import os
 
 from celery import shared_task
-from celery.exceptions import Retry
+from celery.exceptions import Retry, SoftTimeLimitExceeded
 from openai import OpenAI
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -66,6 +66,25 @@ SYSTEM_INSTRUCTION = (
 )
 
 
+def _handle_task_failure(task, scan_report_id, exc) -> None:
+    try:
+        scan_report = ScanReport.objects.filter(id=scan_report_id).first()
+        if scan_report and task.request.retries < task.max_retries:
+            raise task.retry(exc=exc)
+
+        if scan_report:
+            scan_report.status = ScanReport.Status.FAILED
+            scan_report.save(update_fields=["status"])
+        ResumeService.refund_failed_scan_credit(scan_report_id)
+    except Retry:
+        raise
+    except Exception:
+        logger.exception(
+            "Failed to update status/refund credit after task failure | scan_report_id=%s",
+            scan_report_id,
+        )
+
+
 @shared_task(
     bind=True,
     max_retries=3,
@@ -73,6 +92,8 @@ SYSTEM_INSTRUCTION = (
     retry_backoff=True,
     retry_backoff_max=60,
     retry_jitter=True,
+    soft_time_limit=140,
+    time_limit=170,
 )
 def run_ai_review_task(self, scan_report_id):
     try:
@@ -81,7 +102,15 @@ def run_ai_review_task(self, scan_report_id):
             scan_report_id,
             self.request.retries + 1,
         )
-        scan_report = ScanReport.objects.get(id=scan_report_id)
+        scan_report = ScanReport.objects.select_related("resume").get(id=scan_report_id)
+
+        if scan_report.status == ScanReport.Status.DONE:
+            logger.info(
+                "Scan already completed; skipping duplicate execution | scan_report_id=%s",
+                scan_report_id,
+            )
+            return
+
         scan_report.status = ScanReport.Status.PROCESSING
         scan_report.save(update_fields=["status"])
 
@@ -102,9 +131,17 @@ def run_ai_review_task(self, scan_report_id):
             ResumeService.refund_failed_scan_credit(scan_report_id)
             return
 
+        base_url = os.environ.get(
+            "OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"
+        )
+        model_name = os.environ.get(
+            "OPENROUTER_MODEL", "google/gemini-2.5-flash"
+        )
+        api_key = os.environ.get("OPENROUTER_API_KEY")
+
         client = OpenAI(
-            base_url="https://openrouter.ai/api/v1",
-            api_key=os.environ.get("OPENROUTER_API_KEY"),
+            base_url=base_url,
+            api_key=api_key,
             timeout=60.0,
         )
 
@@ -143,7 +180,7 @@ You MUST return a JSON object that strictly adheres to this JSON Schema:
         )
 
         completion = client.chat.completions.create(
-            model="google/gemini-2.5-flash",
+            model=model_name,
             messages=[
                 {"role": "system", "content": SYSTEM_INSTRUCTION},
                 {"role": "user", "content": prompt},
@@ -152,6 +189,15 @@ You MUST return a JSON object that strictly adheres to this JSON Schema:
             temperature=0.1,
             max_tokens=4096,
         )
+
+        if completion.usage:
+            logger.info(
+                "OpenRouter token usage | scan_report_id=%s prompt=%s completion=%s total=%s",
+                scan_report_id,
+                completion.usage.prompt_tokens,
+                completion.usage.completion_tokens,
+                completion.usage.total_tokens,
+            )
 
         raw_content = completion.choices[0].message.content or ""
         finish_reason = completion.choices[0].finish_reason
@@ -192,6 +238,16 @@ You MUST return a JSON object that strictly adheres to this JSON Schema:
     except Retry:
         raise
 
+    except SoftTimeLimitExceeded as exc:
+        logger.warning(
+            "Soft time limit exceeded during OpenRouter review | scan_report_id=%s retry=%s/%s",
+            scan_report_id,
+            self.request.retries,
+            self.max_retries,
+        )
+        _handle_task_failure(self, scan_report_id, exc)
+        raise
+
     except Exception as exc:
         logger.warning(
             "Error in OpenRouter review task | scan_report_id=%s retry=%s/%s err=%s",
@@ -200,21 +256,5 @@ You MUST return a JSON object that strictly adheres to this JSON Schema:
             self.max_retries,
             exc,
         )
-        try:
-            scan_report = ScanReport.objects.filter(id=scan_report_id).first()
-            if scan_report and self.request.retries < self.max_retries:
-                raise self.retry(exc=exc)
-
-            if scan_report:
-                scan_report.status = ScanReport.Status.FAILED
-                scan_report.save(update_fields=["status"])
-            ResumeService.refund_failed_scan_credit(scan_report_id)
-        except Retry:
-            raise
-        except Exception as inner_exc:
-            logger.exception(
-                "Failed to update status/refund credit after task failure | scan_report_id=%s err=%s",
-                scan_report_id,
-                inner_exc,
-            )
-        raise exc
+        _handle_task_failure(self, scan_report_id, exc)
+        raise 
