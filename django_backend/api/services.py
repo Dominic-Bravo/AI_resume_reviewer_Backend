@@ -1,4 +1,3 @@
-# api/services.py
 import hashlib
 import zipfile
 
@@ -101,6 +100,86 @@ class ResumeService:
         return extracted_text
 
     @staticmethod
+    def _get_inflight_scan(resume, job_title: str, job_desc: str):
+        """Finds any pending or processing scan for a given resume and job target."""
+        return (
+            ScanReport.objects.filter(
+                resume=resume,
+                target_job_title=job_title,
+                target_job_desc=job_desc,
+                status__in=[ScanReport.Status.PENDING, ScanReport.Status.PROCESSING],
+            )
+            .order_by("-id")
+            .first()
+        )
+
+    @staticmethod
+    def _deduct_credits(user) -> None:
+        """Atomically deducts 1 credit from user, raising APIException if insufficient."""
+        updated_rows = (
+            type(user)
+            .objects.filter(pk=user.pk, credits__gte=1)
+            .update(credits=F("credits") - 1)
+        )
+        if not updated_rows:
+            raise APIException(
+                "Insufficient credits. Please top up to analyze resumes.", code=402
+            )
+        user.refresh_from_db(fields=["credits"])
+
+    @staticmethod
+    def _get_or_create_resume(user, file_hash: str, uploaded_file, bounded_text: str) -> Resume:
+        """Gets or creates a Resume record and ensures parsed text and file name are up-to-date."""
+        resume, created = Resume.objects.get_or_create(
+            user=user,
+            file_hash=file_hash,
+            defaults={
+                "file_name": uploaded_file.name,
+                "parsed_text": bounded_text,
+            },
+        )
+        if not created:
+            resume.file_name = uploaded_file.name
+            resume.parsed_text = bounded_text
+            resume.save(update_fields=["file_name", "parsed_text"])
+        return resume
+
+    @staticmethod
+    def _create_scan_report(resume, job_title: str, job_desc: str) -> ScanReport:
+        """Creates a new ScanReport for the resume and job target."""
+        return ScanReport.objects.create(
+            resume=resume,
+            target_job_title=job_title,
+            target_job_desc=job_desc,
+            status=ScanReport.Status.PENDING,
+        )
+
+    @staticmethod
+    def _create_credit_transaction(user, uploaded_file, job_title: str, scan_report_id) -> None:
+        """Records the credit deduction transaction."""
+        CreditTransaction.objects.create(
+            user=user,
+            credits_added=-1,
+            amount_cents=0,
+            description=(
+                f"Resume scan deduction for {uploaded_file.name} "
+                f"({job_title or 'General Role'}) [scan={scan_report_id}]"
+            ),
+        )
+
+    @staticmethod
+    def _enqueue_ai_task(scan_report_id) -> None:
+        """Enqueues the Celery AI review task safely on transaction commit."""
+        scan_id = str(scan_report_id)
+
+        def _enqueue():
+            from .tasks import run_ai_review_task
+
+            run_ai_review_task.delay(scan_id)  # type: ignore[operator]
+
+        transaction.on_commit(_enqueue)
+
+    @staticmethod
     @transaction.atomic
     def process_resume_upload(
         user, uploaded_file, file_hash, extracted_text, job_title, job_desc
@@ -115,91 +194,32 @@ class ResumeService:
 
         existing_resume = Resume.objects.filter(user=user, file_hash=file_hash).first()
         if existing_resume:
-            inflight_scan = (
-                ScanReport.objects.filter(
-                    resume=existing_resume,
-                    target_job_title=normalized_title,
-                    target_job_desc=normalized_desc,
-                    status__in=[ScanReport.Status.PENDING, ScanReport.Status.PROCESSING],
-                )
-                .order_by("-id")
-                .first()
+            inflight_scan = ResumeService._get_inflight_scan(
+                existing_resume, normalized_title, normalized_desc
             )
             if inflight_scan:
                 return existing_resume, inflight_scan
 
-        # Atomic conditional deduction prevents two concurrent requests from overdrawing credits
-        updated_rows = (
-            type(user)
-            .objects.filter(pk=user.pk, credits__gte=1)
-            .update(credits=F("credits") - 1)
-        )
-        if not updated_rows:
-            raise APIException(
-                "Insufficient credits. Please top up to analyze resumes.", code=402
-            )
+        ResumeService._deduct_credits(user)
+        resume = ResumeService._get_or_create_resume(user, file_hash, uploaded_file, bounded_text)
 
-        user.refresh_from_db(fields=["credits"])
-
-        # Get or create the resume record based on file hash and user
-        resume, created = Resume.objects.get_or_create(
-            user=user,
-            file_hash=file_hash,
-            defaults={
-                "file_name": uploaded_file.name,
-                "parsed_text": bounded_text,
-            },
-        )
-
-        # If the resume already existed, keep filename and parsed_text current
-        if not created:
-            resume.file_name = uploaded_file.name
-            resume.parsed_text = bounded_text
-            resume.save(update_fields=["file_name", "parsed_text"])
-
-        # ALWAYS create a brand new ScanReport so re-scans trigger fresh AI runs
         try:
-            scan_report = ScanReport.objects.create(
-                resume=resume,
-                target_job_title=normalized_title,
-                target_job_desc=normalized_desc,
-                status=ScanReport.Status.PENDING,
+            scan_report = ResumeService._create_scan_report(
+                resume, normalized_title, normalized_desc
             )
         except IntegrityError:
-            # Only catches simultaneous races if the DB partial UniqueConstraint on ScanReport is added
             transaction.set_rollback(True)
-            inflight_scan = (
-                ScanReport.objects.filter(
-                    resume=resume,
-                    target_job_title=normalized_title,
-                    target_job_desc=normalized_desc,
-                    status__in=[ScanReport.Status.PENDING, ScanReport.Status.PROCESSING],
-                )
-                .order_by("-id")
-                .first()
+            inflight_scan = ResumeService._get_inflight_scan(
+                resume, normalized_title, normalized_desc
             )
             if inflight_scan:
                 return resume, inflight_scan
             raise
 
-        CreditTransaction.objects.create(
-            user=user,
-            credits_added=-1,
-            amount_cents=0,
-            description=(
-                f"Resume scan deduction for {uploaded_file.name} "
-                f"({normalized_title or 'General Role'}) [scan={scan_report.id}]"
-            ),
+        ResumeService._create_credit_transaction(
+            user, uploaded_file, normalized_title, scan_report.id
         )
-
-        scan_id = str(scan_report.id)
-
-        def _enqueue_scan():
-            from .tasks import run_ai_review_task
-
-            run_ai_review_task.delay(scan_id) # type: ignore[operator]
-
-        transaction.on_commit(_enqueue_scan)
+        ResumeService._enqueue_ai_task(scan_report.id)
 
         return resume, scan_report
 

@@ -66,6 +66,10 @@ SYSTEM_INSTRUCTION = (
 )
 
 
+# ==========================================
+# Helper Functions
+# ==========================================
+
 def _handle_task_failure(task, scan_report_id, exc) -> None:
     try:
         scan_report = ScanReport.objects.filter(id=scan_report_id).first()
@@ -84,6 +88,116 @@ def _handle_task_failure(task, scan_report_id, exc) -> None:
             scan_report_id,
         )
 
+
+def _handle_empty_resume(scan_report: ScanReport, scan_report_id) -> None:
+    logger.warning(
+        "Empty resume parsed_text; skipping OpenRouter call and refunding | scan_report_id=%s",
+        scan_report_id,
+    )
+    scan_report.status = ScanReport.Status.FAILED
+    scan_report.save(update_fields=["status"])
+    ResumeService.refund_failed_scan_credit(scan_report_id)
+
+
+def _build_prompt(job_title: str, job_desc: str, resume_text: str) -> str:
+    schema_json_str = json.dumps(
+        ResumeAnalysisResponse.model_json_schema(), indent=2
+    )
+    return f"""
+Analyze the provided resume text against the target job description and evaluate its fitness for the role, regardless of industry (e.g., healthcare, finance, engineering, marketing, etc.).
+
+Target Job Title: {job_title}
+
+Job Description:
+{job_desc}
+
+--- START RESUME CONTENT ---
+<resume_document>
+{resume_text}
+</resume_document>
+--- END RESUME CONTENT ---
+
+Evaluation Guidelines:
+1. Overall Score: Calculate a realistic score (0-100) reflecting how well the candidate matches the job requirements.
+2. Category Breakdown: Dynamically generate 3 to 5 key scoring pillars relevant to this specific profession (e.g., "experience", "domain_skills", "impact_metrics", "formatting"), with scores from 0 to 100 for each.
+3. Missing Keywords: Extract a comprehensive list of crucial hard skills, tools, methodologies, certifications, or domain terms mentioned in the job description that are absent from the resume.
+4. Section Critiques: Evaluate every major section found in the resume (e.g., Summary, Experience, Projects, Education, Certifications, Skills). Provide constructive critiques and action-oriented, quantified suggested rewrites for each section where improvement is needed.
+
+You MUST return a JSON object that strictly adheres to this JSON Schema:
+{schema_json_str}
+"""
+
+
+def _call_openrouter_api(client: OpenAI, model_name: str, prompt: str, scan_report_id):
+    logger.info(
+        "Calling OpenRouter API | scan_report_id=%s model=%s",
+        scan_report_id,
+        "google/gemini-2.5-flash",
+    )
+    completion = client.chat.completions.create(
+        model=model_name,
+        messages=[
+            {"role": "system", "content": SYSTEM_INSTRUCTION},
+            {"role": "user", "content": prompt},
+        ],
+        response_format={"type": "json_object"},
+        temperature=0.1,
+        max_tokens=4096,
+    )
+
+    if completion.usage:
+        logger.info(
+            "OpenRouter token usage | scan_report_id=%s prompt=%s completion=%s total=%s",
+            scan_report_id,
+            completion.usage.prompt_tokens,
+            completion.usage.completion_tokens,
+            completion.usage.total_tokens,
+        )
+
+    return completion
+
+
+def _process_and_save_results(scan_report: ScanReport, completion, scan_report_id):
+    raw_content = completion.choices[0].message.content or ""
+    finish_reason = completion.choices[0].finish_reason
+    if finish_reason == "length":
+        logger.warning(
+            "OpenRouter response hit max_tokens limit (finish_reason=length) | scan_report_id=%s",
+            scan_report_id,
+        )
+    try:
+        result_data = ResumeAnalysisResponse.model_validate_json(raw_content)
+    except (json.JSONDecodeError, ValidationError) as parse_exc:
+        logger.error(
+            "Invalid or truncated JSON from OpenRouter | scan_report_id=%s finish_reason=%s err=%s",
+            scan_report_id,
+            finish_reason,
+            parse_exc,
+        )
+        raise ValueError(
+            f"Model output failed schema validation: {parse_exc}"
+        ) from parse_exc
+
+    logger.info(
+        "OpenRouter API response received | scan_report_id=%s", scan_report_id
+    )
+
+    scan_report.overall_score = result_data.overall_score
+    scan_report.category_scores = {
+        item.category: item.score for item in result_data.category_scores
+    }
+    scan_report.missing_keywords = result_data.missing_keywords
+    scan_report.section_critiques = [
+        critique.model_dump() for critique in result_data.section_critiques
+    ]
+    scan_report.status = ScanReport.Status.DONE
+    scan_report.save()
+    logger.info("Scan completed successfully | scan_report_id=%s", scan_report_id)
+
+
+# ==========================================
+# Celery Task
+# ==========================================
 
 @shared_task(
     bind=True,
@@ -122,13 +236,7 @@ def run_ai_review_task(self, scan_report_id):
         )
 
         if not resume_text:
-            logger.warning(
-                "Empty resume parsed_text; skipping OpenRouter call and refunding | scan_report_id=%s",
-                scan_report_id,
-            )
-            scan_report.status = ScanReport.Status.FAILED
-            scan_report.save(update_fields=["status"])
-            ResumeService.refund_failed_scan_credit(scan_report_id)
+            _handle_empty_resume(scan_report, scan_report_id)
             return
 
         base_url = os.environ.get(
@@ -145,95 +253,9 @@ def run_ai_review_task(self, scan_report_id):
             timeout=60.0,
         )
 
-        schema_json_str = json.dumps(
-            ResumeAnalysisResponse.model_json_schema(), indent=2
-        )
-
-        prompt = f"""
-Analyze the provided resume text against the target job description and evaluate its fitness for the role, regardless of industry (e.g., healthcare, finance, engineering, marketing, etc.).
-
-Target Job Title: {job_title}
-
-Job Description:
-{job_desc}
-
---- START RESUME CONTENT ---
-<resume_document>
-{resume_text}
-</resume_document>
---- END RESUME CONTENT ---
-
-Evaluation Guidelines:
-1. Overall Score: Calculate a realistic score (0-100) reflecting how well the candidate matches the job requirements.
-2. Category Breakdown: Dynamically generate 3 to 5 key scoring pillars relevant to this specific profession (e.g., "experience", "domain_skills", "impact_metrics", "formatting"), with scores from 0 to 100 for each.
-3. Missing Keywords: Extract a comprehensive list of crucial hard skills, tools, methodologies, certifications, or domain terms mentioned in the job description that are absent from the resume.
-4. Section Critiques: Evaluate every major section found in the resume (e.g., Summary, Experience, Projects, Education, Certifications, Skills). Provide constructive critiques and action-oriented, quantified suggested rewrites for each section where improvement is needed.
-
-You MUST return a JSON object that strictly adheres to this JSON Schema:
-{schema_json_str}
-"""
-
-        logger.info(
-            "Calling OpenRouter API | scan_report_id=%s model=%s",
-            scan_report_id,
-            "google/gemini-2.5-flash",
-        )
-
-        completion = client.chat.completions.create(
-            model=model_name,
-            messages=[
-                {"role": "system", "content": SYSTEM_INSTRUCTION},
-                {"role": "user", "content": prompt},
-            ],
-            response_format={"type": "json_object"},
-            temperature=0.1,
-            max_tokens=4096,
-        )
-
-        if completion.usage:
-            logger.info(
-                "OpenRouter token usage | scan_report_id=%s prompt=%s completion=%s total=%s",
-                scan_report_id,
-                completion.usage.prompt_tokens,
-                completion.usage.completion_tokens,
-                completion.usage.total_tokens,
-            )
-
-        raw_content = completion.choices[0].message.content or ""
-        finish_reason = completion.choices[0].finish_reason
-        if finish_reason == "length":
-            logger.warning(
-                "OpenRouter response hit max_tokens limit (finish_reason=length) | scan_report_id=%s",
-                scan_report_id,
-            )
-        try:
-            result_data = ResumeAnalysisResponse.model_validate_json(raw_content)
-        except (json.JSONDecodeError, ValidationError) as parse_exc:
-            logger.error(
-                "Invalid or truncated JSON from OpenRouter | scan_report_id=%s finish_reason=%s err=%s",
-                scan_report_id,
-                finish_reason,
-                parse_exc,
-            )
-            raise ValueError(
-                f"Model output failed schema validation: {parse_exc}"
-            ) from parse_exc
-
-        logger.info(
-            "OpenRouter API response received | scan_report_id=%s", scan_report_id
-        )
-
-        scan_report.overall_score = result_data.overall_score
-        scan_report.category_scores = {
-            item.category: item.score for item in result_data.category_scores
-        }
-        scan_report.missing_keywords = result_data.missing_keywords
-        scan_report.section_critiques = [
-            critique.model_dump() for critique in result_data.section_critiques
-        ]
-        scan_report.status = ScanReport.Status.DONE
-        scan_report.save()
-        logger.info("Scan completed successfully | scan_report_id=%s", scan_report_id)
+        prompt = _build_prompt(job_title, job_desc, resume_text)
+        completion = _call_openrouter_api(client, model_name, prompt, scan_report_id)
+        _process_and_save_results(scan_report, completion, scan_report_id)
 
     except Retry:
         raise
@@ -257,4 +279,4 @@ You MUST return a JSON object that strictly adheres to this JSON Schema:
             exc,
         )
         _handle_task_failure(self, scan_report_id, exc)
-        raise 
+        raise

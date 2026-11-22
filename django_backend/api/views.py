@@ -36,10 +36,48 @@ from api.throttles import ResumeUploadThrottle
 
 User = get_user_model()
 
+
+# ==========================================
+# Utility & Helper Functions
+# ==========================================
+
+def set_refresh_cookie(response: Response, refresh_token: str) -> None:
+    """Attaches HttpOnly refresh token cookie to the response."""
+    response.set_cookie(
+        key=settings.SIMPLE_JWT["AUTH_COOKIE"],
+        value=refresh_token,
+        max_age=int(settings.SIMPLE_JWT["REFRESH_TOKEN_LIFETIME"].total_seconds()),
+        httponly=settings.SIMPLE_JWT["AUTH_COOKIE_HTTP_ONLY"],
+        secure=settings.SIMPLE_JWT["AUTH_COOKIE_SECURE"],
+        samesite=settings.SIMPLE_JWT["AUTH_COOKIE_SAMESITE"],
+        path=settings.SIMPLE_JWT["AUTH_COOKIE_PATH"],
+    )
+
+
+def _init_redis_client() -> redis.Redis:
+    """Initializes and returns a safe Redis client connection."""
+    raw_redis_url = (os.getenv("REDIS_URL") or "redis://localhost:6379/0").strip()
+    if not raw_redis_url.startswith(("redis://", "rediss://", "unix://")):
+        raw_redis_url = "redis://localhost:6379/0"
+    return redis.Redis.from_url(raw_redis_url)
+
+
+redis_client = _init_redis_client()
+
+
+# ==========================================
+# System Health Check
+# ==========================================
+
 @csrf_exempt
 @require_http_methods(["GET", "HEAD"])
 def health_check(request):
     return JsonResponse({"status": "ok"}, status=200)
+
+
+# ==========================================
+# Authentication Views
+# ==========================================
 
 class BaseCustomSocialLoginView(SocialLoginView):
     permission_classes = (permissions.AllowAny,)
@@ -88,19 +126,6 @@ class GoogleLoginAPIView(BaseCustomSocialLoginView):
         return super().post(request, *args, **kwargs)
 
 
-def set_refresh_cookie(response: Response, refresh_token: str) -> None:
-    """Attaches HttpOnly cookie to response."""
-    response.set_cookie(
-        key=settings.SIMPLE_JWT["AUTH_COOKIE"],
-        value=refresh_token,
-        max_age=int(settings.SIMPLE_JWT["REFRESH_TOKEN_LIFETIME"].total_seconds()),
-        httponly=settings.SIMPLE_JWT["AUTH_COOKIE_HTTP_ONLY"],
-        secure=settings.SIMPLE_JWT["AUTH_COOKIE_SECURE"],
-        samesite=settings.SIMPLE_JWT["AUTH_COOKIE_SAMESITE"],
-        path=settings.SIMPLE_JWT["AUTH_COOKIE_PATH"],
-    )
-
-
 class RegisterAPIView(APIView):
     permission_classes = (permissions.AllowAny,)
     serializer_class = RegisterSerializer
@@ -120,20 +145,17 @@ class RegisterAPIView(APIView):
             raise ValueError("Expected a single user instance from RegisterSerializer.save().")
 
         refresh = RefreshToken.for_user(saved_user)
-        user = saved_user
 
         response = Response(
             {
                 "access": str(refresh.access_token),
-                "user": UserResponseSerializer(user).data,
+                "user": UserResponseSerializer(saved_user).data,
                 "message": "User registered successfully.",
             },
             status=status.HTTP_201_CREATED,
         )   
 
-        # Store refresh token in HttpOnly cookie.
         set_refresh_cookie(response, str(refresh))
-
         return response
 
 
@@ -201,15 +223,12 @@ class LogoutAPIView(APIView):
             status=status.HTTP_200_OK,
         )
 
-        # Delete refresh cookie
         response.delete_cookie(
             key=settings.SIMPLE_JWT["AUTH_COOKIE"],
             path=settings.SIMPLE_JWT["AUTH_COOKIE_PATH"],
         )
 
-        # Delete access cookie if configured separately
         access_cookie = settings.SIMPLE_JWT.get("AUTH_ACCESS_COOKIE")
-
         if access_cookie:
             response.delete_cookie(
                 key=access_cookie,
@@ -244,8 +263,6 @@ class TokenRefreshAPIView(APIView):
 
         try:
             refresh = RefreshToken(refresh_token)
-
-            # Generate a new access token.
             access_token = str(refresh.access_token)
 
             response = Response(
@@ -253,21 +270,15 @@ class TokenRefreshAPIView(APIView):
                 status=status.HTTP_200_OK,
             )
 
-            # Rotate refresh token when enabled.
             if api_settings.ROTATE_REFRESH_TOKENS:
-                # Blacklist the old refresh token.
                 if api_settings.BLACKLIST_AFTER_ROTATION:
                     refresh.blacklist()
 
-                # Generate a new refresh token.
                 refresh.set_jti()
                 refresh.set_exp()
                 refresh.set_iat()
 
-                new_refresh = str(refresh)
-
-                # Store the new refresh token in HttpOnly cookie.
-                set_refresh_cookie(response, new_refresh)
+                set_refresh_cookie(response, str(refresh))
 
             return response
 
@@ -282,7 +293,6 @@ class ProtectedTestView(APIView):
     permission_classes = (IsAuthenticated,)
 
     def get(self, request):
-        # request.user is automatically populated by your JWT authentication backend
         user = request.user
         return Response(
             {
@@ -295,11 +305,24 @@ class ProtectedTestView(APIView):
         )
 
 
-raw_redis_url = (os.getenv("REDIS_URL") or "redis://localhost:6379/0").strip()
-if not raw_redis_url.startswith(("redis://", "rediss://", "unix://")):
-    raw_redis_url = "redis://localhost:6379/0"
-redis_client = redis.Redis.from_url(raw_redis_url)
+class UserCreditBalanceView(APIView):
+    permission_classes = (permissions.IsAuthenticated,)
+    serializer_class = UserMeSerializer
 
+    @extend_schema(
+        summary="Get current user's credit balance",
+        responses={200: UserMeSerializer},
+        tags=["Authentication"],
+    )
+    def get(self, request, *args, **kwargs):
+        request.user.refresh_from_db(fields=["credits"])
+        serializer = self.serializer_class(request.user, context={"request": request})
+        return Response(serializer.data, status=status.HTTP_200_OK)
+
+
+# ==========================================
+# Resume Pipeline Views
+# ==========================================
 
 class UploadResumeView(APIView):
     serializer_class = UploadResumeSerializer
@@ -346,11 +369,9 @@ class UploadResumeView(APIView):
         )
 
         try:
-            # 1. Compute hash and extract text
             file_hash = ResumeService.compute_file_hash(uploaded_file)
             extracted_text = ResumeService.extract_resume_text(uploaded_file)
 
-            # 2. Process upload (handles saving/updating resume and always triggers a fresh scan)
             resume, scan_report = ResumeService.process_resume_upload(
                 user=user,
                 uploaded_file=uploaded_file,
@@ -421,18 +442,3 @@ class UserScanHistoryView(generics.ListAPIView):
             .prefetch_related(Prefetch("scans", queryset=scans_queryset))
             .order_by("-created_at")
         )
-
-class UserCreditBalanceView(APIView):
-    permission_classes = (permissions.IsAuthenticated,)
-    serializer_class = UserMeSerializer
-
-    @extend_schema(
-        summary="Get current user's credit balance",
-        responses={200: UserMeSerializer},
-        tags=["Authentication"],
-    )
-    def get(self, request, *args, **kwargs):
-        # Refresh from DB if needed so newly deducted/added credits are always accurate
-        request.user.refresh_from_db(fields=["credits"])
-        serializer = self.serializer_class(request.user, context={"request": request})
-        return Response(serializer.data, status=status.HTTP_200_OK)
